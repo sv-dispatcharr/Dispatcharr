@@ -1,4 +1,4 @@
-name: Build .deb (reusable)
+name: Dist (reusable)
 
 on:
   workflow_call:
@@ -7,17 +7,18 @@ on:
         description: "Package version string (e.g. 0.25.1 or dev)"
         required: true
         type: string
+      ref:
+        description: "Git ref to check out"
+        required: false
+        type: string
+        default: ""
       image_ref:
         description: "Docker image ref - used as fallback if rootfs artifact is unavailable"
         required: false
         type: string
         default: ""
       release_tag:
-        description: "GitHub release tag to upload the .deb to"
-        required: true
-        type: string
-      ref:
-        description: "Git ref to check out"
+        description: "GitHub release tag to upload packages to (omit to upload as workflow artifacts)"
         required: false
         type: string
         default: ""
@@ -30,7 +31,44 @@ permissions:
   packages: read
 
 jobs:
-  build:
+  get-rootfs:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: amd64
+            runner: ubuntu-24.04
+          - platform: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Download rootfs artifact
+        id: artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rootfs-${{ matrix.platform }}
+        continue-on-error: true
+
+      - name: Pull Docker image (fallback if artifact unavailable)
+        if: steps.artifact.outcome == 'failure' && inputs.image_ref != ''
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker pull --platform linux/${{ matrix.platform }} "${{ inputs.image_ref }}"
+          CTNR=$(docker create "${{ inputs.image_ref }}")
+          docker export "$CTNR" > rootfs.tar
+          docker rm "$CTNR"
+
+      - name: Upload rootfs artifact
+        if: steps.artifact.outcome == 'failure' && inputs.image_ref != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-${{ matrix.platform }}
+          path: rootfs.tar
+          retention-days: 1
+
+  build-deb:
+    needs: [get-rootfs]
     strategy:
       fail-fast: false
       matrix:
@@ -52,21 +90,9 @@ jobs:
           ref: ${{ inputs.ref }}
 
       - name: Download rootfs artifact
-        id: artifact
         uses: actions/download-artifact@v4
         with:
           name: rootfs-${{ matrix.platform }}
-        continue-on-error: true
-
-      - name: Pull Docker image (fallback if artifact unavailable)
-        if: steps.artifact.outcome == 'failure' && inputs.image_ref != ''
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | \
-            docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          docker pull --platform linux/${{ matrix.platform }} "${{ inputs.image_ref }}"
-          CTNR=$(docker create "${{ inputs.image_ref }}")
-          docker export "$CTNR" > rootfs.tar
-          docker rm "$CTNR"
 
       - name: Extract rootfs
         run: |
@@ -194,6 +220,15 @@ jobs:
           ./nfpm package --config scripts/deb/nfpm.yaml --packager deb
 
       - name: Upload .deb to release
+        if: inputs.release_tag != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ inputs.release_tag }}" *.deb --clobber
+
+      - name: Upload .deb as workflow artifact
+        if: inputs.release_tag == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: dispatcharr-deb-${{ matrix.deb_arch }}
+          path: "*.deb"
+          retention-days: 7

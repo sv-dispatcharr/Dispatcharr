@@ -255,9 +255,9 @@ jobs:
           prerelease: false
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  bundle-deb:
+  dist:
     needs: [prepare, create-release]
-    uses: ./.github/workflows/_build-deb.yml
+    uses: ./.github/workflows/dist.yml
     with:
       version: ${{ needs.prepare.outputs.new_version }}
       image_ref: ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.new_version }}
