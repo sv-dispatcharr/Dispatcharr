@@ -168,6 +168,29 @@ jobs:
             TIMESTAMP=${{ needs.prepare.outputs.timestamp }}
           file: ./docker/Dockerfile
 
+      - name: Export rootfs from BuildKit cache
+        if: github.event_name != 'pull_request'
+        run: |
+          docker buildx build \
+            --platform linux/${{ matrix.platform }} \
+            --output type=tar,dest=rootfs.tar \
+            --build-arg REPO_OWNER=${{ needs.prepare.outputs.repo_owner }} \
+            --build-arg REPO_NAME=${{ needs.prepare.outputs.repo_name }} \
+            --build-arg BASE_TAG=base \
+            --build-arg BRANCH=${{ github.ref_name }} \
+            --build-arg REPO_URL=https://github.com/${{ github.repository }} \
+            --build-arg TIMESTAMP=${{ needs.prepare.outputs.timestamp }} \
+            --file ./docker/Dockerfile \
+            .
+
+      - name: Upload rootfs artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-${{ matrix.platform }}
+          path: rootfs.tar
+          retention-days: 1
+
   create-manifest:
     # wait for prepare and all matrix builds to finish
     needs: [prepare, docker]
@@ -241,3 +264,12 @@ jobs:
             --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${BRANCH_TAG} \
             --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${VERSION}-${TIMESTAMP} \
             docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${BRANCH_TAG}-amd64 docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${BRANCH_TAG}-arm64
+
+  dist:
+    needs: [prepare, docker]
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/dist.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      ref: ${{ github.ref_name }}
+    secrets: inherit
