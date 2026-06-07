@@ -1,0 +1,23 @@
+name: dispatcharr
+version: ${VERSION}
+arch: ${ARCH}
+maintainer: Dispatcharr Team <https://github.com/Dispatcharr/Dispatcharr>
+description: IPTV and stream management platform
+homepage: https://github.com/Dispatcharr/Dispatcharr
+license: AGPL-3.0
+
+contents:
+  - src: ./pkg/
+    dst: /opt/dispatcharr/
+    type: tree
+    file_info:
+      mode: 0755
+
+  - src: ./scripts/deb/dispatcharr.service
+    dst: /lib/systemd/system/dispatcharr.service
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: ./scripts/deb/postinst
+  preremove: ./scripts/deb/prerm

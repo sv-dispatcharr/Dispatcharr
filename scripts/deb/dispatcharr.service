@@ -1,0 +1,16 @@
+[Unit]
+Description=Dispatcharr IPTV Manager
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=forking
+ExecStart=/opt/dispatcharr/dispatcharr start
+ExecStop=/opt/dispatcharr/dispatcharr stop
+Restart=on-failure
+RestartSec=10
+User=dispatcharr
+
+[Install]
+WantedBy=multi-user.target

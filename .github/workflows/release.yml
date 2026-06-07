@@ -235,3 +235,13 @@ jobs:
           draft: false
           prerelease: false
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  bundle-deb:
+    needs: [prepare, create-release]
+    uses: ./.github/workflows/_build-deb.yml
+    with:
+      version: ${{ needs.prepare.outputs.new_version }}
+      image_ref: ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.new_version }}
+      release_tag: v${{ needs.prepare.outputs.new_version }}
+      ref: main
+    secrets: inherit

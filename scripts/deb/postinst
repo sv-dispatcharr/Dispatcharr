@@ -1,0 +1,104 @@
+#!/bin/bash
+set -e
+
+D=/opt/dispatcharr
+DATA="$D/data"
+PGPORT="${POSTGRES_PORT:-15432}"
+PGUSER="dispatcharr"
+PGDB="dispatcharr"
+
+_run() {
+  runuser -s /bin/bash dispatcharr -c "$1"
+}
+
+_migrate() {
+  _run "
+    export PATH=\"$D/bin:$D/venv/bin:\$PATH\"
+    export DJANGO_SETTINGS_MODULE=dispatcharr.settings
+    export DISPATCHARR_ENV=aio
+    export POSTGRES_HOST=127.0.0.1
+    export POSTGRES_PORT=$PGPORT
+    export POSTGRES_USER=$PGUSER
+    export POSTGRES_DB=$PGDB
+    export POSTGRES_PASSWORD=dispatcharr
+    export REDIS_HOST=127.0.0.1
+    export REDIS_PORT=16379
+    export DJANGO_SECRET_KEY=\"\$(cat $DATA/jwt)\"
+    cd \"$D/app\" && python manage.py migrate $1
+  "
+}
+
+case "$1" in
+  configure)
+    if ! id -u dispatcharr >/dev/null 2>&1; then
+      useradd --system --no-create-home --shell /usr/sbin/nologin dispatcharr
+    fi
+
+    if [ -z "$2" ]; then
+      # ── First install ──────────────────────────────────────────────────
+
+      mkdir -p "$DATA/db" "$DATA/logs" "$DATA/logos" "$DATA/recordings" \
+               "$DATA/uploads" "$DATA/backups" \
+               "$DATA/tmp/nginx/"{client_body,proxy,fastcgi,uwsgi,scgi} \
+               "$D/run" "$D/config"
+
+      cp -r "$D/config.defaults/." "$D/config/"
+
+      "$D/python/bin/python3" -c \
+        "import secrets; print(secrets.token_hex(50))" > "$DATA/jwt"
+
+      chown -R dispatcharr:dispatcharr "$D"
+      chmod 700 "$DATA/db"
+
+      # Build Python venv from bundled wheels (no internet required)
+      _run "\"$D/python/bin/python3\" -m venv \"$D/venv\""
+      _run "\"$D/venv/bin/pip\" install --no-index \
+        --find-links=\"$D/wheels\" -r \"$D/requirements.txt\" -q"
+
+      # Initialize PostgreSQL
+      _run "\"$D/bin/initdb\" -D \"$DATA/db\" -E UTF8 --locale=C --no-instructions"
+
+      # Allow TCP loopback (trust — loopback only, no external exposure)
+      printf 'local all all trust\nhost all all 127.0.0.1/32 trust\n' \
+        > "$DATA/db/pg_hba.conf"
+      chown dispatcharr:dispatcharr "$DATA/db/pg_hba.conf"
+      sed -i "s/#port = 5432/port = $PGPORT/" "$DATA/db/postgresql.conf"
+      sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '127.0.0.1'/" \
+        "$DATA/db/postgresql.conf"
+
+      _run "\"$D/bin/pg_ctl\" -D \"$DATA/db\" \
+        -l \"$DATA/logs/postgres.log\" -o \"-p $PGPORT\" start -w"
+      _run "\"$D/bin/createdb\" -p $PGPORT $PGDB" || true
+      _migrate "--run-syncdb"
+      _run "\"$D/bin/pg_ctl\" -D \"$DATA/db\" stop"
+
+    else
+      # ── Upgrade ────────────────────────────────────────────────────────
+
+      chown -R dispatcharr:dispatcharr "$D/app"
+      _run "\"$D/venv/bin/pip\" install --no-index \
+        --find-links=\"$D/wheels\" -r \"$D/requirements.txt\" -q" || true
+
+      systemctl stop dispatcharr 2>/dev/null || true
+      sleep 1
+
+      PGPORT=$(grep "^POSTGRES_PORT=" "$D/config/dispatcharr.env" 2>/dev/null \
+        | cut -d= -f2 || echo 15432)
+
+      _run "\"$D/bin/pg_ctl\" -D \"$DATA/db\" \
+        -l \"$DATA/logs/postgres.log\" -o \"-p $PGPORT\" start -w"
+      _migrate ""
+      _run "\"$D/bin/pg_ctl\" -D \"$DATA/db\" stop"
+    fi
+
+    if systemctl is-system-running --quiet 2>/dev/null; then
+      systemctl daemon-reload
+      systemctl enable dispatcharr
+      systemctl start dispatcharr
+    fi
+    ;;
+
+  abort-upgrade|abort-install)
+    systemctl start dispatcharr 2>/dev/null || true
+    ;;
+esac
