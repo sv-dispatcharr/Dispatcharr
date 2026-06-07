@@ -149,13 +149,20 @@ jobs:
           pkg/venv-tmp/bin/uv pip compile pyproject.toml \
             -o pkg/requirements.txt --no-progress --quiet
 
-          # Download wheels; pip download is used here as uv has no equivalent command.
+          # uwsgi has no pre-built wheel for CPython 3.13 on PyPI - compile it in CI
+          # where gcc is available so postinst never needs a compiler on the target machine.
+          sudo apt-get install -y --no-install-recommends gcc libpcre3-dev
+          pkg/venv-tmp/bin/pip wheel uwsgi --no-deps -w pkg/wheels/ --quiet
+
+          # Download remaining wheels; pip download is used here as uv has no equivalent command.
           # The PyTorch CPU index must be passed explicitly since pip doesn't read pyproject.toml.
+          # uwsgi will be re-fetched as an sdist - remove it after to keep only the compiled wheel.
           pkg/venv-tmp/bin/pip download \
             -r pkg/requirements.txt \
             --extra-index-url https://download.pytorch.org/whl/cpu \
             -d pkg/wheels/ \
             --quiet
+          rm -f pkg/wheels/uWSGI-*.tar.gz
           rm -rf pkg/venv-tmp
 
       - name: Bundle app code
