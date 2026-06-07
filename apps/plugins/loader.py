@@ -10,6 +10,7 @@ import types
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from django.conf import settings
 from django.db import transaction
 
 from .models import PluginConfig
@@ -48,7 +49,7 @@ class PluginManager:
         return cls._instance
 
     def __init__(self) -> None:
-        self.plugins_dir = os.environ.get("DISPATCHARR_PLUGINS_DIR", "/data/plugins")
+        self.plugins_dir = os.environ.get("DISPATCHARR_PLUGINS_DIR", os.path.join(settings.DATA_DIR, "plugins"))
         self._registry: Dict[str, LoadedPlugin] = {}
         self._package_names: Dict[str, str] = {}
         self._alias_names: Dict[str, str] = {}

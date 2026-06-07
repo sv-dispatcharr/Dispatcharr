@@ -94,11 +94,11 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         if "file" in request.FILES:
             file = request.FILES["file"]
             try:
-                file_path = safe_upload_path(file.name, "/data/uploads/m3us")
+                file_path = safe_upload_path(file.name, os.path.join(settings.DATA_DIR, "uploads", "m3us"))
             except ValueError:
                 return Response({"detail": "Invalid filename."}, status=status.HTTP_400_BAD_REQUEST)
 
-            os.makedirs("/data/uploads/m3us", exist_ok=True)
+            os.makedirs(os.path.join(settings.DATA_DIR, "uploads", "m3us"), exist_ok=True)
             with open(file_path, "wb+") as destination:
                 for chunk in file.chunks():
                     destination.write(chunk)
@@ -159,11 +159,11 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         if "file" in request.FILES:
             file = request.FILES["file"]
             try:
-                file_path = safe_upload_path(file.name, "/data/uploads/m3us")
+                file_path = safe_upload_path(file.name, os.path.join(settings.DATA_DIR, "uploads", "m3us"))
             except ValueError:
                 return Response({"detail": "Invalid filename."}, status=status.HTTP_400_BAD_REQUEST)
 
-            os.makedirs("/data/uploads/m3us", exist_ok=True)
+            os.makedirs(os.path.join(settings.DATA_DIR, "uploads", "m3us"), exist_ok=True)
             with open(file_path, "wb+") as destination:
                 for chunk in file.chunks():
                     destination.write(chunk)

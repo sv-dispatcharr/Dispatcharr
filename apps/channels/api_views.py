@@ -8,6 +8,7 @@ from drf_spectacular.utils import extend_schema, OpenApiParameter, inline_serial
 from drf_spectacular.types import OpenApiTypes
 from rest_framework import serializers
 from django.shortcuts import get_object_or_404, get_list_or_404
+from django.conf import settings
 from django.db import connection, transaction
 from django.db.models import Count, F, Prefetch
 from django.db.models import Q
@@ -2497,7 +2498,7 @@ class BulkDeleteLogosAPIView(APIView):
 
         for logo in logos_to_delete:
             # Handle file deletion for local files
-            if delete_files and logo.url and logo.url.startswith('/data/logos'):
+            if delete_files and logo.url and logo.url.startswith(os.path.join(settings.DATA_DIR, 'logos')):
                 try:
                     if os.path.exists(logo.url):
                         os.remove(logo.url)
@@ -2567,7 +2568,7 @@ class CleanupUnusedLogosAPIView(APIView):
         # Handle file deletion for local files if requested
         if delete_files:
             for logo in unused_logos:
-                if logo.url and logo.url.startswith('/data/logos'):
+                if logo.url and logo.url.startswith(os.path.join(settings.DATA_DIR, 'logos')):
                     try:
                         if os.path.exists(logo.url):
                             os.remove(logo.url)
@@ -2686,7 +2687,7 @@ class LogoViewSet(viewsets.ModelViewSet):
         delete_file = request.query_params.get('delete_file', 'false').lower() == 'true'
 
         # Check if it's a local file that should be deleted
-        if delete_file and logo.url and logo.url.startswith('/data/logos'):
+        if delete_file and logo.url and logo.url.startswith(os.path.join(settings.DATA_DIR, 'logos')):
             try:
                 if os.path.exists(logo.url):
                     os.remove(logo.url)
@@ -2726,11 +2727,11 @@ class LogoViewSet(viewsets.ModelViewSet):
 
         # Sanitize filename: strip directory components to prevent path traversal
         try:
-            file_path = safe_upload_path(file.name, "/data/logos")
+            file_path = safe_upload_path(file.name, os.path.join(settings.DATA_DIR, "logos"))
         except ValueError:
             return Response({"error": "Invalid filename."}, status=status.HTTP_400_BAD_REQUEST)
 
-        os.makedirs("/data/logos", exist_ok=True)
+        os.makedirs(os.path.join(settings.DATA_DIR, "logos"), exist_ok=True)
         with open(file_path, "wb+") as destination:
             for chunk in file.chunks():
                 destination.write(chunk)
@@ -2771,7 +2772,7 @@ class LogoViewSet(viewsets.ModelViewSet):
         """Streams the logo file, whether it's local or remote."""
         logo = self.get_object()
         logo_url = logo.url
-        if logo_url.startswith("/data"):  # Local file
+        if logo_url.startswith(settings.DATA_DIR):  # Local file
             if not os.path.exists(logo_url):
                 raise Http404("Image not found")
             stat = os.stat(logo_url)
@@ -3815,8 +3816,8 @@ class RecordingViewSet(viewsets.ModelViewSet):
             pass
 
         # 3. Defer slow teardown to a background thread
-        library_dir = '/data'
-        allowed_roots = ['/data/', library_dir.rstrip('/') + '/']
+        library_dir = settings.DATA_DIR
+        allowed_roots = [settings.DATA_DIR + '/', library_dir.rstrip('/') + '/']
 
         def _safe_remove(path: str):
             if not path or not isinstance(path, str):
@@ -3840,7 +3841,7 @@ class RecordingViewSet(viewsets.ModelViewSet):
                 logger.warning(f"Failed to delete HLS directory {path}: {ex}")
 
         # Clean up empty parent directories up to the recordings root to prevent orphaned folders from accumulating over time.
-        recordings_root = os.path.normpath('/data/recordings')
+        recordings_root = os.path.normpath(os.path.join(settings.DATA_DIR, 'recordings'))
 
         def _prune_empty_parents(path: str):
             if not path or not isinstance(path, str):

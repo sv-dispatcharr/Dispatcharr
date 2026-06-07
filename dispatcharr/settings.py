@@ -21,6 +21,10 @@ def _validate_tls_cert_paths(paths, service_name):
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Root for all persistent data. Docker deployments use /data (the default);
+# the deb package sets this to /opt/dispatcharr/data via DISPATCHARR_DATA_DIR.
+DATA_DIR = os.environ.get('DISPATCHARR_DATA_DIR', '/data')
+
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
@@ -217,7 +221,7 @@ if os.getenv("DB_ENGINE", None) == "sqlite":
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
-            "NAME": "/data/dispatcharr.db",
+            "NAME": os.path.join(DATA_DIR, "dispatcharr.db"),
         }
     }
 else:
@@ -410,11 +414,11 @@ MEDIA_ROOT = BASE_DIR / "media"
 MEDIA_URL = "/media/"
 
 # Backup settings
-BACKUP_ROOT = os.environ.get("BACKUP_ROOT", "/data/backups")
+BACKUP_ROOT = os.environ.get("BACKUP_ROOT", os.path.join(DATA_DIR, "backups"))
 BACKUP_DATA_DIRS = [
-    os.environ.get("LOGOS_DIR", "/data/logos"),
-    os.environ.get("UPLOADS_DIR", "/data/uploads"),
-    os.environ.get("PLUGINS_DIR", "/data/plugins"),
+    os.environ.get("LOGOS_DIR", os.path.join(DATA_DIR, "logos")),
+    os.environ.get("UPLOADS_DIR", os.path.join(DATA_DIR, "uploads")),
+    os.environ.get("PLUGINS_DIR", os.path.join(DATA_DIR, "plugins")),
 ]
 
 SERVER_IP = "127.0.0.1"
@@ -567,7 +571,7 @@ LOGGING = {
 
 # Connect script execution safety settings
 # Allowed base directories for custom scripts; real paths must be inside
-_allowed_dirs_env = os.environ.get("DISPATCHARR_ALLOWED_SCRIPT_DIRS", "/data/scripts")
+_allowed_dirs_env = os.environ.get("DISPATCHARR_ALLOWED_SCRIPT_DIRS", os.path.join(DATA_DIR, "scripts"))
 CONNECT_ALLOWED_SCRIPT_DIRS = [p for p in _allowed_dirs_env.split(":") if p]
 
 # Max execution time (seconds) for scripts

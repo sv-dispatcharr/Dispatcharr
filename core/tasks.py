@@ -6,6 +6,7 @@ import logging
 import re
 import time
 import os
+from django.conf import settings
 from core.utils import RedisClient, send_websocket_update, acquire_task_lock, release_task_lock
 from apps.proxy.live_proxy.channel_status import ChannelStatus
 from apps.m3u.models import M3UAccount
@@ -18,9 +19,9 @@ from django.db import transaction
 
 logger = logging.getLogger(__name__)
 
-EPG_WATCH_DIR = '/data/epgs'
-M3U_WATCH_DIR = '/data/m3us'
-LOGO_WATCH_DIR = '/data/logos'
+EPG_WATCH_DIR = os.path.join(settings.DATA_DIR, 'epgs')
+M3U_WATCH_DIR = os.path.join(settings.DATA_DIR, 'm3us')
+LOGO_WATCH_DIR = os.path.join(settings.DATA_DIR, 'logos')
 MIN_AGE_SECONDS = 6
 STARTUP_SKIP_AGE = 30
 REDIS_PREFIX = "processed_file:"

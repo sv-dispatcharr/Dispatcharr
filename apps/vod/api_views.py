@@ -6,6 +6,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny
 from django_filters.rest_framework import DjangoFilterBackend
 from django.shortcuts import get_object_or_404
+from django.conf import settings
 from django.http import StreamingHttpResponse, HttpResponse, FileResponse
 from django.db.models import Q
 import django_filters
@@ -860,7 +861,7 @@ class VODLogoViewSet(viewsets.ModelViewSet):
             return HttpResponse(status=404)
 
         # Check if this is a local file path
-        if logo.url.startswith('/data/'):
+        if logo.url.startswith(settings.DATA_DIR):
             # It's a local file
             file_path = logo.url
             if not os.path.exists(file_path):

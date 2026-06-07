@@ -542,9 +542,9 @@ def is_protected_path(file_path):
 
     # List of protected directory prefixes
     protected_dirs = [
-        '/data/epgs',     # EPG files mapped from host
-        '/data/uploads',   # User uploaded files
-        '/data/m3us'       # M3U files mapped from host
+        os.path.join(settings.DATA_DIR, 'epgs'),
+        os.path.join(settings.DATA_DIR, 'uploads'),
+        os.path.join(settings.DATA_DIR, 'm3us'),
     ]
 
     # Check if the path starts with any protected directory

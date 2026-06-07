@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+from django.conf import settings
 import re
 import time
 from rest_framework import viewsets, status, serializers
@@ -85,7 +86,7 @@ class EPGSourceViewSet(viewsets.ModelViewSet):
 
         file = request.FILES["file"]
         file_name = file.name
-        file_path = os.path.join("/data/uploads/epgs", file_name)
+        file_path = os.path.join(settings.DATA_DIR, "uploads", "epgs", file_name)
 
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, "wb+") as destination:

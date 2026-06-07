@@ -1,6 +1,7 @@
 # apps/channels/tasks.py
 import logging
 import os
+from django.conf import settings
 import select
 import re
 import requests
@@ -243,7 +244,7 @@ def get_sentence_transformer():
             from sentence_transformers import util
 
             model_name = "sentence-transformers/all-MiniLM-L6-v2"
-            cache_dir = "/data/models"
+            cache_dir = os.path.join(settings.DATA_DIR, "models")
 
             # Check environment variable to disable downloads
             disable_downloads = os.environ.get('DISABLE_ML_DOWNLOADS', 'false').lower() == 'true'
@@ -1649,8 +1650,7 @@ def _build_output_paths(channel, program, start_time, end_time, recording_id):
     directories unambiguously.
     """
     from core.models import CoreSettings
-    # Root for DVR recordings: fixed to /data/recordings inside the container
-    library_root = '/data/recordings'
+    library_root = os.path.join(settings.DATA_DIR, 'recordings')
 
     is_movie, season, episode, year, sub_title = _parse_epg_tv_movie_info(program)
     show = _safe_name(program.get('title') if isinstance(program, dict) else channel.name)

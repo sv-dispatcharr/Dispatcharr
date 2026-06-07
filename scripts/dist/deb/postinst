@@ -37,6 +37,7 @@ _spin() {
 _run() {
   runuser -s /bin/bash dispatcharr -c "
     export LD_LIBRARY_PATH=\"$D/lib/${ARCH}-linux-gnu:$D/python/lib:\${LD_LIBRARY_PATH:-}\"
+    export DISPATCHARR_DATA_DIR=\"$DATA\"
     export PIP_NO_CACHE_DIR=1
     $1
   "
@@ -82,7 +83,9 @@ case "$1" in
       # ── First install ──────────────────────────────────────────────────
 
       mkdir -p "$DATA/db" "$DATA/logs" "$DATA/logos" "$DATA/recordings" \
-               "$DATA/uploads" "$DATA/backups" \
+               "$DATA/uploads/m3us" "$DATA/uploads/epgs" "$DATA/backups" \
+               "$DATA/m3us" "$DATA/epg" "$DATA/plugins" "$DATA/models" \
+               "$DATA/scripts" "$DATA/logo_cache" \
                "$DATA/tmp/nginx/"{client_body,proxy,fastcgi,uwsgi,scgi} \
                "$D/run" "$D/config"
 
