@@ -58,7 +58,7 @@ case "$1" in
       # Initialize PostgreSQL
       _run "\"$D/bin/initdb\" -D \"$DATA/db\" -E UTF8 --locale=C --no-instructions"
 
-      # Allow TCP loopback (trust — loopback only, no external exposure)
+      # Allow TCP loopback (trust - loopback only, no external exposure)
       printf 'local all all trust\nhost all all 127.0.0.1/32 trust\n' \
         > "$DATA/db/pg_hba.conf"
       chown dispatcharr:dispatcharr "$DATA/db/pg_hba.conf"

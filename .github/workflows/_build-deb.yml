@@ -8,9 +8,10 @@ on:
         required: true
         type: string
       image_ref:
-        description: "Docker image to extract binaries from (multi-arch manifest)"
-        required: true
+        description: "Docker image ref - used as fallback if rootfs artifact is unavailable"
+        required: false
         type: string
+        default: ""
       release_tag:
         description: "GitHub release tag to upload the .deb to"
         required: true
@@ -47,19 +48,25 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+      - name: Download rootfs artifact
+        id: artifact
+        uses: actions/download-artifact@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          name: rootfs-${{ matrix.platform }}
+        continue-on-error: true
 
-      - name: Pull Docker image and export rootfs
+      - name: Pull Docker image (fallback if artifact unavailable)
+        if: steps.artifact.outcome == 'failure' && inputs.image_ref != ''
         run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            docker login ghcr.io -u ${{ github.actor }} --password-stdin
           docker pull --platform linux/${{ matrix.platform }} "${{ inputs.image_ref }}"
           CTNR=$(docker create "${{ inputs.image_ref }}")
           docker export "$CTNR" > rootfs.tar
           docker rm "$CTNR"
+
+      - name: Extract rootfs
+        run: |
           mkdir rootfs
           tar xf rootfs.tar -C rootfs/ 2>/dev/null || true
 
@@ -92,7 +99,7 @@ jobs:
             grep -v 'ld-linux' | \
             while read -r lib; do
               rootfs_lib="rootfs${lib}"
-              [ -f "$rootfs_lib" ] && cp -n "$rootfs_lib" "pkg/lib/${LIB}/" || true
+              [ -f "$rootfs_lib" ] && cp --update=none "$rootfs_lib" "pkg/lib/${LIB}/" || true
             done
           done
 
@@ -109,10 +116,17 @@ jobs:
 
           pkg/python/bin/python3 -m venv pkg/venv-tmp
           pkg/venv-tmp/bin/pip install --quiet uv
+          # Resolve pinned requirements (uv respects [[tool.uv.index]] in pyproject.toml)
           pkg/venv-tmp/bin/uv pip compile pyproject.toml \
             -o pkg/requirements.txt --no-progress --quiet
-          pkg/venv-tmp/bin/uv pip download \
-            -r pkg/requirements.txt -d pkg/wheels/ --no-progress --quiet
+
+          # Download wheels; pip download is used here as uv has no equivalent command.
+          # The PyTorch CPU index must be passed explicitly since pip doesn't read pyproject.toml.
+          pkg/venv-tmp/bin/pip download \
+            -r pkg/requirements.txt \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            -d pkg/wheels/ \
+            --quiet
           rm -rf pkg/venv-tmp
 
       - name: Bundle app code
@@ -124,7 +138,7 @@ jobs:
         run: |
           mkdir -p pkg/config.defaults
 
-          # uwsgi.ini — path-substitute docker/uwsgi.ini for the deb layout
+          # uwsgi.ini - path-substitute docker/uwsgi.ini for the deb layout
           sed \
             -e '/exec-pre/d' \
             -e '/attach-daemon = redis-server/d' \
@@ -142,7 +156,7 @@ jobs:
           printf 'logto      = /opt/dispatcharr/data/logs/uwsgi.log\n' \
             >> pkg/config.defaults/uwsgi.ini
 
-          # nginx.conf — nginx-http-header.conf + path-substituted docker/nginx.conf + closing brace
+          # nginx.conf - nginx-http-header.conf + path-substituted docker/nginx.conf + closing brace
           cp scripts/deb/nginx-http-header.conf pkg/config.defaults/nginx.conf
           sed \
             -e 's|proxy_cache_path /data/logo_cache|proxy_cache_path /opt/dispatcharr/data/logo_cache|g' \
@@ -158,7 +172,7 @@ jobs:
             docker/nginx.conf >> pkg/config.defaults/nginx.conf
           echo '}' >> pkg/config.defaults/nginx.conf
 
-          # redis.conf and dispatcharr.env have no Docker equivalent — use static defaults
+          # redis.conf and dispatcharr.env have no Docker equivalent - use static defaults
           cp scripts/deb/config.defaults/redis.conf pkg/config.defaults/
           cp scripts/deb/config.defaults/dispatcharr.env pkg/config.defaults/
 
