@@ -1,0 +1,24 @@
+#!/bin/bash
+set -e
+
+D=/opt/dispatcharr
+
+case "$1" in
+  remove|purge)
+    if [ -d /run/systemd/system ]; then
+      systemctl stop dispatcharr 2>/dev/null || true
+      systemctl disable dispatcharr 2>/dev/null || true
+    else
+      /opt/dispatcharr/dispatcharr stop 2>/dev/null || true
+    fi
+
+    PG_VER=$(ls "$D/share/postgresql/" 2>/dev/null | head -1)
+    if [ -n "$PG_VER" ]; then
+      if [ -L "/usr/share/postgresql/${PG_VER}" ] && \
+         [ "$(readlink "/usr/share/postgresql/${PG_VER}")" = "$D/share/postgresql/${PG_VER}" ]; then
+        rm "/usr/share/postgresql/${PG_VER}"
+        rmdir --ignore-fail-on-non-empty /usr/share/postgresql 2>/dev/null || true
+      fi
+    fi
+    ;;
+esac

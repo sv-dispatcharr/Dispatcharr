@@ -1,0 +1,98 @@
+#!/bin/bash
+set -euo pipefail
+
+D=/opt/dispatcharr
+DATA="$D/data"
+RUN="$D/run"
+
+[ -f "$D/config/dispatcharr.env" ] && source "$D/config/dispatcharr.env"
+
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64)  LIB_ARCH="x86_64-linux-gnu" ;;
+  aarch64) LIB_ARCH="aarch64-linux-gnu" ;;
+  *)       LIB_ARCH="$ARCH" ;;
+esac
+
+export PATH="$D/bin:$D/venv/bin:$PATH"
+export LD_LIBRARY_PATH="$D/lib/${LIB_ARCH}:$D/python/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export VIRTUAL_ENV="$D/venv"
+export PYTHONPATH="$D/app"
+export DJANGO_SETTINGS_MODULE=dispatcharr.settings
+export DISPATCHARR_ENV=aio
+export POSTGRES_HOST=127.0.0.1
+export POSTGRES_PORT="${POSTGRES_PORT:-15432}"
+export POSTGRES_USER="${POSTGRES_USER:-dispatcharr}"
+export POSTGRES_DB="${POSTGRES_DB:-dispatcharr}"
+export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-dispatcharr}"
+export REDIS_HOST=127.0.0.1
+export REDIS_PORT="${REDIS_PORT:-16379}"
+export DAPHNE_PORT="${DAPHNE_PORT:-18001}"
+export UWSGI_HTTP_PORT="${UWSGI_HTTP_PORT:-5656}"
+export DISPATCHARR_PORT="${DISPATCHARR_PORT:-9191}"
+export DISPATCHARR_LOG_LEVEL="${DISPATCHARR_LOG_LEVEL:-INFO}"
+export CELERY_NICE_LEVEL="${CELERY_NICE_LEVEL:-5}"
+export DJANGO_SECRET_KEY="$(cat "$DATA/jwt" 2>/dev/null || true)"
+
+start() {
+  mkdir -p "$RUN" "$DATA/logs" \
+    "$DATA/tmp/nginx/"{client_body,proxy,fastcgi,uwsgi,scgi}
+  pg_ctl -D "$DATA/db" -l "$DATA/logs/postgres.log" \
+    -o "-p $POSTGRES_PORT" start
+  redis-server "$D/config/redis.conf"
+  nginx -c "$D/config/nginx.conf" -p "$D" -e "$DATA/logs/nginx-error.log"
+  uwsgi --ini "$D/config/uwsgi.ini" --daemonize "$DATA/logs/uwsgi.log"
+  echo "Dispatcharr started. Web UI: http://localhost:$DISPATCHARR_PORT"
+}
+
+stop() {
+  [ -f "$RUN/uwsgi.pid" ] && uwsgi --stop "$RUN/uwsgi.pid" 2>/dev/null || \
+    pkill -f "uwsgi.*dispatcharr" 2>/dev/null || true
+  pkill -f "celery.*dispatcharr" 2>/dev/null || true
+  pkill -f "daphne.*dispatcharr.asgi" 2>/dev/null || true
+  nginx -c "$D/config/nginx.conf" -p "$D" -s quit 2>/dev/null || true
+  redis-cli -p "$REDIS_PORT" shutdown 2>/dev/null || true
+  pg_ctl -D "$DATA/db" stop 2>/dev/null || true
+  echo "Dispatcharr stopped"
+}
+
+status() {
+  pg_isready -h 127.0.0.1 -p "$POSTGRES_PORT" -q && \
+    echo "postgres: up" || echo "postgres: down"
+  redis-cli -p "$REDIS_PORT" ping 2>/dev/null | grep -q PONG && \
+    echo "redis:    up" || echo "redis:    down"
+  if [ -f "$RUN/uwsgi.pid" ] && kill -0 "$(cat "$RUN/uwsgi.pid")" 2>/dev/null; then
+    echo "uwsgi:    up"
+  else
+    echo "uwsgi:    down"
+  fi
+}
+
+# start/stop/restart must run as the dispatcharr user
+case "${1:-}" in
+  start|stop|restart)
+    if [ "$(id -u)" -eq 0 ]; then
+      exec runuser -s /bin/bash -u dispatcharr -m -- "$0" "$@"
+    elif [ "$(id -un)" != "dispatcharr" ]; then
+      echo "error: must be run as root or the dispatcharr user" >&2
+      exit 1
+    fi
+    ;;
+esac
+
+case "${1:-}" in
+  start)   start ;;
+  stop)    stop ;;
+  restart) stop; sleep 2; start ;;
+  status)  status ;;
+  logs)    tail -f "$DATA/logs/"*.log ;;
+  backup)
+    OUT="$DATA/backups/dispatcharr-backup-$(date +%Y%m%d_%H%M%S).tar.gz"
+    tar -czf "$OUT" -C "$D" data/
+    echo "Backup saved to $OUT"
+    ;;
+  *)
+    echo "Usage: dispatcharr {start|stop|restart|status|logs|backup}"
+    exit 1
+    ;;
+esac

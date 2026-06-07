@@ -1,0 +1,12 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+  purge)
+    rm -rf /opt/dispatcharr
+    [ -d /run/systemd/system ] && systemctl daemon-reload 2>/dev/null || true
+    ;;
+  remove)
+    [ -d /run/systemd/system ] && systemctl daemon-reload 2>/dev/null || true
+    ;;
+esac

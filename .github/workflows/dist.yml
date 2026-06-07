@@ -1,0 +1,270 @@
+name: Build Packages
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Package version string (e.g. 0.25.1 or dev)"
+        required: true
+        type: string
+      ref:
+        description: "Git ref to check out"
+        required: false
+        type: string
+        default: ""
+      image_ref:
+        description: "Docker image ref - used as fallback if rootfs artifact is unavailable"
+        required: false
+        type: string
+        default: ""
+      release_tag:
+        description: "GitHub release tag to upload packages to (omit to upload as workflow artifacts)"
+        required: false
+        type: string
+        default: ""
+
+env:
+  NFPM_VERSION: "2.46.3"
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  prepare-image:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: amd64
+            runner: ubuntu-24.04
+          - platform: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Download rootfs artifact
+        id: artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: rootfs-${{ matrix.platform }}
+        continue-on-error: true
+
+      - name: Pull Docker image (fallback if artifact unavailable)
+        if: steps.artifact.outcome == 'failure' && inputs.image_ref != ''
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker pull --platform linux/${{ matrix.platform }} "${{ inputs.image_ref }}"
+          CTNR=$(docker create "${{ inputs.image_ref }}")
+          docker export "$CTNR" > rootfs.tar
+          docker rm "$CTNR"
+
+      - name: Upload rootfs artifact
+        if: steps.artifact.outcome == 'failure' && inputs.image_ref != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: rootfs-${{ matrix.platform }}
+          path: rootfs.tar
+          retention-days: 1
+
+  build-deb:
+    needs: [prepare-image]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: amd64
+            runner: ubuntu-24.04
+            lib_arch: x86_64-linux-gnu
+            pbs_arch: x86_64
+            deb_arch: amd64
+          - platform: arm64
+            runner: ubuntu-24.04-arm
+            lib_arch: aarch64-linux-gnu
+            pbs_arch: aarch64
+            deb_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Download rootfs artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: rootfs-${{ matrix.platform }}
+
+      - name: Extract rootfs
+        run: |
+          mkdir rootfs
+          tar xf rootfs.tar -C rootfs/ 2>/dev/null || true
+
+      - name: Extract binaries and bundled .so dependencies
+        run: |
+          LIB=${{ matrix.lib_arch }}
+          mkdir -p pkg/bin pkg/lib/${LIB} pkg/etc/nginx
+
+          PG_BIN="rootfs/usr/lib/postgresql/17/bin"
+          for b in postgres pg_ctl initdb pg_dump pg_isready createdb createuser psql pg_upgrade; do
+            [ -f "${PG_BIN}/$b" ] && cp "${PG_BIN}/$b" pkg/bin/
+          done
+
+          cp rootfs/usr/bin/redis-server rootfs/usr/bin/redis-cli pkg/bin/
+          cp rootfs/usr/sbin/nginx pkg/bin/
+
+          for b in ffmpeg ffprobe; do
+            if   [ -f "rootfs/usr/bin/$b" ];       then cp "rootfs/usr/bin/$b" pkg/bin/
+            elif [ -f "rootfs/usr/local/bin/$b" ]; then cp "rootfs/usr/local/bin/$b" pkg/bin/
+            fi
+          done
+
+          cp -r rootfs/etc/nginx/. pkg/etc/nginx/
+
+          # PostgreSQL share files (postgres.bki, timezone data, etc.)
+          mkdir -p pkg/share
+          [ -d rootfs/usr/share/postgresql ] && cp -r rootfs/usr/share/postgresql pkg/share/
+
+          # PostgreSQL extension modules ($libdir).
+          # PGDG binaries self-locate: $libdir = dirname(binary)/../lib at runtime.
+          # With the binary at /opt/dispatcharr/bin/, $libdir resolves to
+          # /opt/dispatcharr/lib/ — so extension .so files go into pkg/lib/ directly.
+          # Use find rather than a glob so we fail loudly if dict_snowball.so is absent.
+          find rootfs/usr/lib/postgresql/ -name "*.so" ! -type d 2>/dev/null \
+            | while read -r so; do cp -L "$so" pkg/lib/; done
+          if [ ! -f pkg/lib/dict_snowball.so ]; then
+            echo "ERROR: dict_snowball.so not found in Docker rootfs" >&2
+            echo "PostgreSQL files in rootfs:" >&2
+            find rootfs/usr/lib/postgresql -type f 2>/dev/null >&2 || true
+            exit 1
+          fi
+
+          # Collect non-glibc .so deps from the Docker rootfs.
+          # Use readelf (not ldd) so we get DT_NEEDED entries regardless of
+          # whether the CI runner has the library installed.
+          chmod +x pkg/bin/*
+          for bin in pkg/bin/*; do
+            readelf -d "$bin" 2>/dev/null \
+              | awk '/NEEDED/{gsub(/\[|\]/,""); print $NF}' \
+              | grep -Ev '^lib(c|m|dl|pthread|rt|gcc_s|stdc\+\+|gomp|resolv)\.so' \
+              | grep -v 'ld-linux' \
+              | while read -r libname; do
+                  find rootfs/usr/lib/${LIB}/ rootfs/usr/lib/ \
+                       rootfs/lib/${LIB}/      rootfs/lib/ \
+                    -name "${libname}*" ! -type d 2>/dev/null \
+                  | while read -r found; do
+                      # -L dereferences symlinks so libpq.so.5 -> libpq.so.5.17
+                      # is copied as a real file named libpq.so.5
+                      cp -L --update=none "$found" "pkg/lib/${LIB}/" || true
+                    done
+                done
+          done
+
+      - name: Bundle Python and wheels
+        run: |
+          PBS_ARCH=${{ matrix.pbs_arch }}
+          PBS_URL=$(curl -s https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest \
+            | grep "browser_download_url" \
+            | grep "cpython-3\.13" \
+            | grep "${PBS_ARCH}-unknown-linux-gnu-install_only" \
+            | head -1 | cut -d '"' -f 4)
+          curl -fsSL "$PBS_URL" | tar xz
+          cp -a python/. pkg/python/
+
+          pkg/python/bin/python3 -m venv pkg/venv-tmp
+          pkg/venv-tmp/bin/pip install --quiet uv
+          # Resolve pinned requirements (uv respects [[tool.uv.index]] in pyproject.toml)
+          pkg/venv-tmp/bin/uv pip compile pyproject.toml \
+            -o pkg/requirements.txt --no-progress --quiet
+
+          # uwsgi has no pre-built wheel for CPython 3.13 on PyPI - compile it in CI
+          # where gcc is available so postinst never needs a compiler on the target machine.
+          # LDFLAGS points the linker at libpython3.13 inside the PBS Python we bundled.
+          sudo apt-get install -y --no-install-recommends gcc libpcre3-dev
+          LDFLAGS="-L$(pwd)/pkg/python/lib" \
+          pkg/venv-tmp/bin/pip wheel uwsgi --no-deps -w pkg/wheels/ --quiet
+
+          # Download remaining wheels; pip download is used here as uv has no equivalent command.
+          # The PyTorch CPU index must be passed explicitly since pip doesn't read pyproject.toml.
+          # uwsgi will be re-fetched as an sdist - remove it after to keep only the compiled wheel.
+          pkg/venv-tmp/bin/pip download \
+            -r pkg/requirements.txt \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            -d pkg/wheels/ \
+            --quiet
+          rm -f pkg/wheels/uWSGI-*.tar.gz
+          rm -rf pkg/venv-tmp
+
+      - name: Bundle app code
+        run: |
+          # App code from Docker image includes pre-built frontend + collected statics
+          cp -r rootfs/app/. pkg/app/
+
+      - name: Generate configs from Docker sources
+        run: |
+          mkdir -p pkg/config.defaults
+
+          # uwsgi.ini - path-substitute docker/uwsgi.ini for the deb layout
+          sed \
+            -e '/exec-pre/d' \
+            -e '/attach-daemon = redis-server/d' \
+            -e 's|nice -n $(CELERY_NICE_LEVEL) celery|nice -n $(CELERY_NICE_LEVEL) /opt/dispatcharr/venv/bin/python -m celery|g' \
+            -e 's|attach-daemon = daphne -b 0\.0\.0\.0 -p 8001|attach-daemon = /opt/dispatcharr/venv/bin/python -m daphne -b 127.0.0.1 -p $(DAPHNE_PORT)|g' \
+            -e 's|chdir = /app|chdir = /opt/dispatcharr/app|g' \
+            -e 's|virtualenv = /dispatcharrpy|virtualenv = /opt/dispatcharr/venv|g' \
+            -e 's|socket = /app/uwsgi\.sock|socket = /opt/dispatcharr/run/uwsgi.sock|g' \
+            -e 's|http = 0\.0\.0\.0:5656|http = 127.0.0.1:$(UWSGI_HTTP_PORT)|g' \
+            -e 's|static-map = /static=/app/static|static-map = /static=/opt/dispatcharr/app/static|g' \
+            docker/uwsgi.ini > pkg/config.defaults/uwsgi.ini
+          # Add deb-specific settings absent from the Docker version
+          printf 'pidfile    = /opt/dispatcharr/run/uwsgi.pid\n' \
+            >> pkg/config.defaults/uwsgi.ini
+          printf 'logto      = /opt/dispatcharr/data/logs/uwsgi.log\n' \
+            >> pkg/config.defaults/uwsgi.ini
+
+          # nginx.conf - nginx-http-header.conf + path-substituted docker/nginx.conf + closing brace
+          cp scripts/dist/deb/nginx-http-header.conf pkg/config.defaults/nginx.conf
+          sed \
+            -e 's|proxy_cache_path /data/logo_cache|proxy_cache_path /opt/dispatcharr/data/logo_cache|g' \
+            -e 's|listen NGINX_PORT;|listen      9191;|g' \
+            -e 's|listen \[::\]:NGINX_PORT;|listen      [::]:9191;|g' \
+            -e 's|unix:/app/uwsgi\.sock|unix:/opt/dispatcharr/run/uwsgi.sock|g' \
+            -e 's|root /app/static;|root /opt/dispatcharr/app/static;|g' \
+            -e 's|root /app;|root /opt/dispatcharr/app;|g' \
+            -e 's|root /data;|root /opt/dispatcharr/data;|g' \
+            -e 's|alias /data/backups/;|alias /opt/dispatcharr/data/backups/;|g' \
+            -e 's|include uwsgi_params;|include /opt/dispatcharr/etc/nginx/uwsgi_params;|g' \
+            -e 's|proxy_pass http://127\.0\.0\.1:8001;|proxy_pass http://127.0.0.1:18001;|g' \
+            docker/nginx.conf >> pkg/config.defaults/nginx.conf
+          echo '}' >> pkg/config.defaults/nginx.conf
+
+          # redis.conf and dispatcharr.env have no Docker equivalent - use static defaults
+          cp scripts/dist/deb/config.defaults/redis.conf pkg/config.defaults/
+          cp scripts/dist/deb/config.defaults/dispatcharr.env pkg/config.defaults/
+
+          install -m755 scripts/dist/deb/launcher pkg/dispatcharr
+
+      - name: Build .deb with nfpm
+        run: |
+          case "${{ matrix.deb_arch }}" in
+            amd64) NFPM_ARCH="x86_64" ;;
+            arm64) NFPM_ARCH="arm64"  ;;
+          esac
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_${NFPM_ARCH}.tar.gz" \
+            | tar xz nfpm
+          chmod +x nfpm
+          VERSION=${{ inputs.version }} ARCH=${{ matrix.deb_arch }} \
+          ./nfpm package --config scripts/dist/deb/nfpm.yaml --packager deb
+
+      - name: Upload .deb to release
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ inputs.release_tag }}" *.deb --clobber
+
+      - name: Upload .deb as workflow artifact
+        if: inputs.release_tag == ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: dispatcharr-deb-${{ matrix.deb_arch }}
+          path: "*.deb"
+          retention-days: 7

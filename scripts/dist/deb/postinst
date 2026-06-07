@@ -1,0 +1,164 @@
+#!/bin/bash
+set -e
+
+D=/opt/dispatcharr
+DATA="$D/data"
+PGPORT="${POSTGRES_PORT:-15432}"
+PGUSER="dispatcharr"
+PGDB="dispatcharr"
+ARCH=$(uname -m)
+
+_spin() {
+  local msg="$1"; shift
+  if [ -t 1 ]; then
+    local tmp; tmp=$(mktemp)
+    ( "$@" >"$tmp" 2>&1 ) &
+    local pid=$! i=0 frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    while kill -0 "$pid" 2>/dev/null; do
+      printf "\r%s %s" "${frames:$((i % 10)):1}" "$msg"
+      i=$((i + 1)); sleep 0.1
+    done
+    local rc
+    wait "$pid" && rc=0 || rc=$?
+    if [ $rc -eq 0 ]; then
+      printf "\r\033[32m✓\033[0m %s\n" "$msg"
+    else
+      printf "\r\033[31m✗\033[0m %s\n" "$msg"
+      cat "$tmp" >&2
+    fi
+    rm -f "$tmp"
+    return $rc
+  else
+    echo ">> $msg"
+    "$@"
+  fi
+}
+
+_run() {
+  runuser -s /bin/bash dispatcharr -c "
+    export LD_LIBRARY_PATH=\"$D/lib/${ARCH}-linux-gnu:$D/python/lib:\${LD_LIBRARY_PATH:-}\"
+    export PIP_NO_CACHE_DIR=1
+    $1
+  "
+}
+
+_migrate() {
+  _run "
+    export PATH=\"$D/bin:$D/venv/bin:\$PATH\"
+    export DJANGO_SETTINGS_MODULE=dispatcharr.settings
+    export DISPATCHARR_ENV=aio
+    export POSTGRES_HOST=127.0.0.1
+    export POSTGRES_PORT=$PGPORT
+    export POSTGRES_USER=$PGUSER
+    export POSTGRES_DB=$PGDB
+    export POSTGRES_PASSWORD=dispatcharr
+    export REDIS_HOST=127.0.0.1
+    export REDIS_PORT=16379
+    export DJANGO_SECRET_KEY=\"\$(cat $DATA/jwt)\"
+    cd \"$D/app\" && python manage.py migrate $1
+  "
+}
+
+case "$1" in
+  configure)
+    if ! id -u dispatcharr >/dev/null 2>&1; then
+      useradd --system --no-create-home --shell /usr/sbin/nologin dispatcharr
+    fi
+
+    # PGSHAREDIR is a compile-time absolute path (/usr/share/postgresql/17/).
+    # Symlink our bundled share tree there so initdb finds postgres.bki etc.
+    # $libdir self-locates to dirname(binary)/../lib at runtime, which is
+    # /opt/dispatcharr/lib/ — extension .so files are already there in the package.
+    PG_VER=$(ls "$D/share/postgresql/" 2>/dev/null | head -1)
+    if [ -n "$PG_VER" ]; then
+      if [ ! -f "/usr/share/postgresql/${PG_VER}/postgres.bki" ]; then
+        rm -rf "/usr/share/postgresql/${PG_VER}"
+        mkdir -p /usr/share/postgresql
+        ln -s "$D/share/postgresql/${PG_VER}" "/usr/share/postgresql/${PG_VER}"
+      fi
+    fi
+
+    if [ -z "$2" ]; then
+      # ── First install ──────────────────────────────────────────────────
+
+      mkdir -p "$DATA/db" "$DATA/logs" "$DATA/logos" "$DATA/recordings" \
+               "$DATA/uploads" "$DATA/backups" \
+               "$DATA/tmp/nginx/"{client_body,proxy,fastcgi,uwsgi,scgi} \
+               "$D/run" "$D/config"
+
+      cp -r "$D/config.defaults/." "$D/config/"
+
+      "$D/python/bin/python3" -c \
+        "import secrets; print(secrets.token_hex(50))" > "$DATA/jwt"
+
+      chown -R dispatcharr:dispatcharr "$D"
+      chmod 700 "$DATA/db"
+
+      _spin "Creating Python environment" \
+        _run "\"$D/python/bin/python3\" -m venv \"$D/venv\""
+      _spin "Installing Python packages" \
+        _run "\"$D/venv/bin/pip\" install --no-index \
+          --find-links=\"$D/wheels\" -r \"$D/requirements.txt\" -q"
+
+      _spin "Initializing database" \
+        _run "\"$D/bin/initdb\" -D \"$DATA/db\" -E UTF8 --locale=C --no-instructions"
+
+      # Allow TCP loopback (trust - loopback only, no external exposure)
+      printf 'local all all trust\nhost all all 127.0.0.1/32 trust\n' \
+        > "$DATA/db/pg_hba.conf"
+      chown dispatcharr:dispatcharr "$DATA/db/pg_hba.conf"
+      sed -i "s/#port = 5432/port = $PGPORT/" "$DATA/db/postgresql.conf"
+      sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '127.0.0.1'/" \
+        "$DATA/db/postgresql.conf"
+      sed -i "s|^#*unix_socket_directories = .*|unix_socket_directories = '$D/run'|" \
+        "$DATA/db/postgresql.conf"
+
+      _spin "Starting database" \
+        _run "\"$D/bin/pg_ctl\" -D \"$DATA/db\" \
+          -l \"$DATA/logs/postgres.log\" -o \"-p $PGPORT\" start -w"
+      _run "\"$D/bin/createdb\" -h 127.0.0.1 -p $PGPORT $PGDB" || true
+      _spin "Running database migrations" _migrate "--run-syncdb"
+      _spin "Stopping database" _run "\"$D/bin/pg_ctl\" -D \"$DATA/db\" stop"
+
+    else
+      # ── Upgrade ────────────────────────────────────────────────────────
+
+      chown -R dispatcharr:dispatcharr "$D/app"
+      _spin "Updating Python packages" \
+        _run "\"$D/venv/bin/pip\" install --no-index \
+          --find-links=\"$D/wheels\" -r \"$D/requirements.txt\" -q" || true
+
+      if [ -d /run/systemd/system ]; then
+        systemctl stop dispatcharr 2>/dev/null || true
+      else
+        "$D/dispatcharr" stop 2>/dev/null || true
+      fi
+      sleep 1
+
+      PGPORT=$(grep "^POSTGRES_PORT=" "$D/config/dispatcharr.env" 2>/dev/null \
+        | cut -d= -f2 || echo 15432)
+
+      _spin "Starting database" \
+        _run "\"$D/bin/pg_ctl\" -D \"$DATA/db\" \
+          -l \"$DATA/logs/postgres.log\" -o \"-p $PGPORT\" start -w"
+      _spin "Running database migrations" _migrate ""
+      _spin "Stopping database" _run "\"$D/bin/pg_ctl\" -D \"$DATA/db\" stop"
+    fi
+
+    if [ -d /run/systemd/system ]; then
+      systemctl daemon-reload
+      systemctl enable dispatcharr
+      systemctl start dispatcharr
+    else
+      "$D/dispatcharr" start 2>/dev/null || true
+    fi
+    ;;
+
+  abort-upgrade|abort-install)
+    if [ -d /run/systemd/system ]; then
+      systemctl start dispatcharr 2>/dev/null || true
+    else
+      "$D/dispatcharr" start 2>/dev/null || true
+    fi
+    ;;
+esac

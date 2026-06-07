@@ -8,6 +8,11 @@ on:
   pull_request:
     branches: [dev]
   workflow_dispatch:
+    inputs:
+      build_packages:
+        description: "Build and publish distribution packages"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -22,6 +27,7 @@ jobs:
       repo_name: ${{ steps.meta.outputs.repo_name }}
       branch_tag: ${{ steps.meta.outputs.branch_tag }}
       version: ${{ steps.version.outputs.version }}
+      dist_version: ${{ steps.dist_version.outputs.dist_version }}
       timestamp: ${{ steps.timestamp.outputs.timestamp }}
 
     steps:
@@ -68,6 +74,14 @@ jobs:
           else
             echo "is_fork=false" >> $GITHUB_OUTPUT
           fi
+
+      - name: Compute dist version
+        id: dist_version
+        run: |
+          SHORT_SHA=${GITHUB_SHA::7}
+          BRANCH_TAG=${{ steps.meta.outputs.branch_tag }}
+          VERSION=${{ steps.version.outputs.version }}
+          echo "dist_version=${VERSION}-${BRANCH_TAG}-${SHORT_SHA}" >> $GITHUB_OUTPUT
 
   docker:
     needs: [prepare]
@@ -167,6 +181,31 @@ jobs:
             REPO_URL=https://github.com/${{ github.repository }}
             TIMESTAMP=${{ needs.prepare.outputs.timestamp }}
           file: ./docker/Dockerfile
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+      - name: Export rootfs from BuildKit cache
+        if: github.event_name != 'pull_request'
+        run: |
+          docker buildx build \
+            --platform linux/${{ matrix.platform }} \
+            --output type=tar,dest=rootfs.tar \
+            --build-arg REPO_OWNER=${{ needs.prepare.outputs.repo_owner }} \
+            --build-arg REPO_NAME=${{ needs.prepare.outputs.repo_name }} \
+            --build-arg BASE_TAG=base \
+            --build-arg BRANCH=${{ github.ref_name }} \
+            --build-arg REPO_URL=https://github.com/${{ github.repository }} \
+            --build-arg TIMESTAMP=${{ needs.prepare.outputs.timestamp }} \
+            --file ./docker/Dockerfile \
+            .
+
+      - name: Upload rootfs artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: rootfs-${{ matrix.platform }}
+          path: rootfs.tar
+          retention-days: 1
 
   create-manifest:
     # wait for prepare and all matrix builds to finish
@@ -241,3 +280,12 @@ jobs:
             --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${BRANCH_TAG} \
             --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${VERSION}-${TIMESTAMP} \
             docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${BRANCH_TAG}-amd64 docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${BRANCH_TAG}-arm64
+
+  dist:
+    needs: [prepare, docker]
+    # if: github.event_name == 'workflow_dispatch' && inputs.build_packages == true
+    uses: ./.github/workflows/dist.yml
+    with:
+      version: ${{ needs.prepare.outputs.dist_version }}
+      ref: ${{ github.ref_name }}
+    secrets: inherit
