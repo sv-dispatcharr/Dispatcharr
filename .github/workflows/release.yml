@@ -152,6 +152,25 @@ jobs:
             REPO_URL=https://github.com/${{ github.repository }}
           file: ./docker/Dockerfile
 
+      - name: Export rootfs from BuildKit cache
+        run: |
+          docker buildx build \
+            --platform linux/${{ matrix.platform }} \
+            --output type=tar,dest=rootfs.tar \
+            --build-arg REPO_OWNER=${{ needs.prepare.outputs.repo_owner }} \
+            --build-arg REPO_NAME=${{ needs.prepare.outputs.repo_name }} \
+            --build-arg BRANCH=${{ github.ref_name }} \
+            --build-arg REPO_URL=https://github.com/${{ github.repository }} \
+            --file ./docker/Dockerfile \
+            .
+
+      - name: Upload rootfs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-${{ matrix.platform }}
+          path: rootfs.tar
+          retention-days: 1
+
   create-manifest:
     needs: [prepare, docker]
     runs-on: ubuntu-24.04
