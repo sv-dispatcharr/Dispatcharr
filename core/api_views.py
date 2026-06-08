@@ -425,6 +425,7 @@ def version(request):
         {
             "version": __version__,
             "timestamp": __timestamp__,
+            "install_method": os.getenv("DISPATCHARR_INSTALL_METHOD", "Docker"),
         }
     )
 

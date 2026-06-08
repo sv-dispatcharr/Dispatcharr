@@ -24,6 +24,15 @@ import {
   Skeleton,
   Tooltip,
 } from '@mantine/core';
+import {
+  SiUbuntu,
+  SiDebian,
+  SiDocker,
+  SiFedora,
+  SiArchlinux,
+  SiAlpinelinux,
+  SiLinux,
+} from '@icons-pack/react-simple-icons';
 import logo from '../images/logo.png';
 import useChannelsStore from '../store/channels';
 import './sidebar.css';
@@ -32,6 +41,27 @@ import useAuthStore from '../store/auth';
 import { USER_LEVELS } from '../constants';
 import UserForm from './forms/User';
 import NotificationCenter from './NotificationCenter';
+
+const INSTALL_ICON_MAP = {
+  ubuntu: SiUbuntu,
+  debian: SiDebian,
+  docker: SiDocker,
+  fedora: SiFedora,
+  arch:   SiArchlinux,
+  alpine: SiAlpinelinux,
+  linux:  SiLinux,
+};
+
+function parseInstallMethod(method) {
+  if (!method) return { Icon: null, text: null };
+  const lower = method.toLowerCase();
+  for (const [key, Icon] of Object.entries(INSTALL_ICON_MAP)) {
+    if (lower.startsWith(key)) {
+      return { Icon, text: method.slice(key.length).trim() || null };
+    }
+  }
+  return { Icon: null, text: method };
+}
 
 const DonateButton = ({ tooltipPosition = 'top' }) => (
   <Tooltip label="Support Dispatcharr" position={tooltipPosition}>
@@ -155,6 +185,7 @@ const Sidebar = ({ collapsed, toggleDrawer, drawerWidth, miniDrawerWidth }) => {
   const channelIds = useChannelsStore((s) => s.channelIds);
   const environment = useSettingsStore((s) => s.environment);
   const appVersion = useSettingsStore((s) => s.version);
+  const { Icon: InstallIcon } = parseInstallMethod(appVersion?.install_method);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const authUser = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
@@ -421,36 +452,46 @@ const Sidebar = ({ collapsed, toggleDrawer, drawerWidth, miniDrawerWidth }) => {
           wrap="nowrap"
           style={{ padding: '0 16px 16px', justifyContent: 'space-between' }}
         >
-          <Tooltip
-            label={`v${appVersion?.version || '0.0.0'}${appVersion?.timestamp ? `-${appVersion.timestamp}` : ''}`}
-            position="top"
-          >
-            <Text
-              size="xs"
-              c="dimmed"
-              style={{
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-                minWidth: 0,
-                flex: 1,
-                cursor: 'pointer',
-              }}
-              onClick={() =>
-                copyToClipboard(
-                  `v${appVersion?.version || '0.0.0'}${appVersion?.timestamp ? `-${appVersion.timestamp}` : ''}`,
-                  {
-                    successTitle: 'Copied',
-                    successMessage: 'Version copied to clipboard',
+          <Stack gap={0} style={{ flex: 1, minWidth: 0 }}>
+            <Group gap={4} wrap="nowrap" align="center">
+              {InstallIcon && (
+                <Tooltip label={appVersion.install_method} position="top">
+                  <InstallIcon size={10} color="currentColor" style={{ opacity: 0.5, flexShrink: 0 }} />
+                </Tooltip>
+              )}
+              <Tooltip
+                label={`v${appVersion?.version || '0.0.0'}${appVersion?.timestamp ? `-${appVersion.timestamp}` : ''}`}
+                position="top"
+              >
+                <Text
+                  size="xs"
+                  c="dimmed"
+                  style={{
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    cursor: 'pointer',
+                  }}
+                  onClick={() =>
+                    copyToClipboard(
+                      `v${appVersion?.version || '0.0.0'}${appVersion?.timestamp ? `-${appVersion.timestamp}` : ''}`,
+                      {
+                        successTitle: 'Copied',
+                        successMessage: 'Version copied to clipboard',
+                      }
+                    )
                   }
-                )
-              }
-            >
-              v{appVersion?.version || '0.0.0'}
-              {appVersion?.timestamp ? `-${appVersion.timestamp}` : ''}
-            </Text>
-          </Tooltip>
-          <Group gap="xs" wrap="nowrap">
+                >
+                  v{appVersion?.version || '0.0.0'}
+                  {appVersion?.timestamp ? `-${appVersion.timestamp}` : ''}
+                </Text>
+              </Tooltip>
+            </Group>
+            {!InstallIcon && appVersion?.install_method && (
+              <Text size="xs" c="dimmed" style={{ lineHeight: 1 }}>{appVersion.install_method}</Text>
+            )}
+          </Stack>
+          <Group gap={4} wrap="nowrap">
             <Tooltip label="About" position="top">
               <ActionIcon
                 variant="transparent"

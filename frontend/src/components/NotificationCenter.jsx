@@ -320,7 +320,6 @@ const NotificationCenter = ({ onSettingAction }) => {
           <ActionIcon
             variant="subtle"
             color="gray"
-            size="lg"
             onClick={() => setOpened((o) => !o)}
             aria-label="Notifications"
           >

@@ -17,6 +17,7 @@ const useSettingsStore = create((set, get) => ({
   version: {
     version: '',
     timestamp: null,
+    install_method: null,
   },
   isLoading: false,
   error: null,
@@ -57,6 +58,7 @@ const useSettingsStore = create((set, get) => ({
         newState.version = {
           version: versionData?.version || '',
           timestamp: versionData?.timestamp || null,
+          install_method: versionData?.install_method || null,
         };
       }
 
@@ -77,6 +79,7 @@ const useSettingsStore = create((set, get) => ({
       const version = {
         version: versionData?.version || '',
         timestamp: versionData?.timestamp || null,
+        install_method: versionData?.install_method || null,
       };
       set({ version });
       return version;

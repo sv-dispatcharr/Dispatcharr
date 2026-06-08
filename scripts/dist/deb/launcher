@@ -34,6 +34,9 @@ export DISPATCHARR_DATA_DIR="${DISPATCHARR_DATA_DIR:-/opt/dispatcharr/data}"
 export DISPATCHARR_LOG_LEVEL="${DISPATCHARR_LOG_LEVEL:-INFO}"
 export CELERY_NICE_LEVEL="${CELERY_NICE_LEVEL:-5}"
 export UWSGI_NICE_LEVEL="${UWSGI_NICE_LEVEL:-0}"
+_OS=$(. /etc/os-release 2>/dev/null && echo "${NAME:-Linux} ${VERSION_ID}")
+export DISPATCHARR_INSTALL_METHOD="${_OS} (.deb)"
+unset _OS
 export DJANGO_SECRET_KEY="$(cat "$DATA/jwt" 2>/dev/null || true)"
 
 start() {
