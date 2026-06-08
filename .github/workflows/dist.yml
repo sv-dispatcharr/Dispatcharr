@@ -117,6 +117,10 @@ jobs:
             elif [ -f "rootfs/usr/local/bin/$b" ]; then cp "rootfs/usr/local/bin/$b" pkg/bin/
             fi
           done
+          if [ ! -f pkg/bin/ffmpeg ] || [ ! -f pkg/bin/ffprobe ]; then
+            echo "ERROR: ffmpeg/ffprobe not found in Docker rootfs" >&2
+            exit 1
+          fi
 
           cp -r rootfs/etc/nginx/. pkg/etc/nginx/
 
@@ -127,7 +131,7 @@ jobs:
           # PostgreSQL extension modules ($libdir).
           # PGDG binaries self-locate: $libdir = dirname(binary)/../lib at runtime.
           # With the binary at /opt/dispatcharr/bin/, $libdir resolves to
-          # /opt/dispatcharr/lib/ — so extension .so files go into pkg/lib/ directly.
+          # /opt/dispatcharr/lib/ - so extension .so files go into pkg/lib/ directly.
           # Use find rather than a glob so we fail loudly if dict_snowball.so is absent.
           find rootfs/usr/lib/postgresql/ -name "*.so" ! -type d 2>/dev/null \
             | while read -r so; do cp -L "$so" pkg/lib/; done
@@ -196,8 +200,11 @@ jobs:
 
       - name: Bundle app code
         run: |
-          # App code from Docker image includes pre-built frontend + collected statics
+          # frontend/dist is present (built during image build); app/static/ is empty
+          # because collectstatic runs at container startup, not build time.
+          # postinst runs collectstatic after pip install.
           cp -r rootfs/app/. pkg/app/
+          rm -rf pkg/app/docker
 
       - name: Generate configs from Docker sources
         run: |
@@ -207,6 +214,9 @@ jobs:
           sed \
             -e '/exec-pre/d' \
             -e '/attach-daemon = redis-server/d' \
+            -e '/Remove file creation commands/d' \
+            -e '/First run Redis/d' \
+            -e '/Start Redis first/d' \
             -e 's|nice -n $(CELERY_NICE_LEVEL) celery|nice -n $(CELERY_NICE_LEVEL) /opt/dispatcharr/venv/bin/python -m celery|g' \
             -e 's|attach-daemon = daphne -b 0\.0\.0\.0 -p 8001|attach-daemon = /opt/dispatcharr/venv/bin/python -m daphne -b 127.0.0.1 -p $(DAPHNE_PORT)|g' \
             -e 's|chdir = /app|chdir = /opt/dispatcharr/app|g' \

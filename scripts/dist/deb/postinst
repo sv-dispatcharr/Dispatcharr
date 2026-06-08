@@ -1,8 +1,17 @@
 #!/bin/bash
+# dpkg post-installation script. Runs AFTER dpkg places package files.
+#
+# configure              First install: create system user, data dirs, Python venv,
+#                        PostgreSQL cluster, run migrations, enable systemd service.
+# configure <old-ver>    Upgrade: update venv and static files, stop service, run
+#                        pg_upgrade if PG major version changed, run migrations,
+#                        restart service.
+# abort-upgrade|abort-install  Installation failed; attempt to restart the service.
 set -e
 
 D=/opt/dispatcharr
 DATA="$D/data"
+STAGING="$D/.pg-upgrade-old"
 PGPORT="${POSTGRES_PORT:-15432}"
 PGUSER="dispatcharr"
 PGDB="dispatcharr"
@@ -43,7 +52,7 @@ _run() {
   "
 }
 
-_migrate() {
+_django() {
   _run "
     export PATH=\"$D/bin:$D/venv/bin:\$PATH\"
     export DJANGO_SETTINGS_MODULE=dispatcharr.settings
@@ -56,8 +65,49 @@ _migrate() {
     export REDIS_HOST=127.0.0.1
     export REDIS_PORT=16379
     export DJANGO_SECRET_KEY=\"\$(cat $DATA/jwt)\"
-    cd \"$D/app\" && python manage.py migrate $1
+    cd \"$D/app\" && python manage.py $1
   "
+}
+
+_migrate() { _django "migrate $1"; }
+_collectstatic() { _django "collectstatic --noinput -v 0"; }
+
+_pg_upgrade() {
+  local old_ver="$1"
+
+  # Old binaries need their share dir at the compiled-in absolute path
+  rm -rf "/usr/share/postgresql/${old_ver}"
+  mkdir -p /usr/share/postgresql
+  ln -s "$STAGING/share/${old_ver}" "/usr/share/postgresql/${old_ver}"
+
+  # Initialize new cluster, then mirror key settings from the existing postgresql.conf
+  _run "\"$D/bin/initdb\" -D \"$DATA/db.new\" -E UTF8 --locale=C --no-instructions"
+  sed -i "s/#port = 5432/port = $PGPORT/" "$DATA/db.new/postgresql.conf"
+  sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '127.0.0.1'/" \
+    "$DATA/db.new/postgresql.conf"
+  sed -i "s|^#*unix_socket_directories = .*|unix_socket_directories = '$D/run'|" \
+    "$DATA/db.new/postgresql.conf"
+  cp "$DATA/db/pg_hba.conf" "$DATA/db.new/pg_hba.conf"
+  chown dispatcharr:dispatcharr \
+    "$DATA/db.new/postgresql.conf" "$DATA/db.new/pg_hba.conf"
+
+  # Run new pg_upgrade binary; include both lib dirs so old and new postgres both resolve
+  _run "
+    export LD_LIBRARY_PATH=\"$D/lib/${ARCH}-linux-gnu:$D/lib:$STAGING/lib/${ARCH}-linux-gnu:$STAGING/lib\"
+    cd \"$DATA\" && \"$D/bin/pg_upgrade\" -b \"$STAGING/bin\" -B \"$D/bin\" -d \"$DATA/db\" -D \"$DATA/db.new\" -o \"-p $PGPORT\" -O \"-p $PGPORT\"
+  "
+
+  # Swap: keep old cluster as db.old-<ver> for manual recovery if migration appears bad
+  mv "$DATA/db" "$DATA/db.old-${old_ver}"
+  mv "$DATA/db.new" "$DATA/db"
+  chmod 700 "$DATA/db"
+
+  # pg_upgrade writes these to its working directory ($DATA)
+  rm -f "$DATA/delete_old_cluster.sh"
+  rm -rf "$DATA/pg_upgrade_output.d"
+
+  rm -f "/usr/share/postgresql/${old_ver}"
+  rmdir --ignore-fail-on-non-empty /usr/share/postgresql 2>/dev/null || true
 }
 
 case "$1" in
@@ -69,7 +119,7 @@ case "$1" in
     # PGSHAREDIR is a compile-time absolute path (/usr/share/postgresql/17/).
     # Symlink our bundled share tree there so initdb finds postgres.bki etc.
     # $libdir self-locates to dirname(binary)/../lib at runtime, which is
-    # /opt/dispatcharr/lib/ — extension .so files are already there in the package.
+    # /opt/dispatcharr/lib/; extension .so files are already there in the package.
     PG_VER=$(ls "$D/share/postgresql/" 2>/dev/null | head -1)
     if [ -n "$PG_VER" ]; then
       if [ ! -f "/usr/share/postgresql/${PG_VER}/postgres.bki" ]; then
@@ -84,7 +134,7 @@ case "$1" in
 
       mkdir -p "$DATA/db" "$DATA/logs" "$DATA/logos" "$DATA/recordings" \
                "$DATA/uploads/m3us" "$DATA/uploads/epgs" "$DATA/backups" \
-               "$DATA/m3us" "$DATA/epg" "$DATA/plugins" "$DATA/models" \
+               "$DATA/m3us" "$DATA/epgs" "$DATA/plugins" "$DATA/models" \
                "$DATA/scripts" "$DATA/logo_cache" \
                "$DATA/tmp/nginx/"{client_body,proxy,fastcgi,uwsgi,scgi} \
                "$D/run" "$D/config"
@@ -102,6 +152,7 @@ case "$1" in
       _spin "Installing Python packages" \
         _run "\"$D/venv/bin/pip\" install --no-index \
           --find-links=\"$D/wheels\" -r \"$D/requirements.txt\" -q"
+      _spin "Collecting static files" _collectstatic
 
       _spin "Initializing database" \
         _run "\"$D/bin/initdb\" -D \"$DATA/db\" -E UTF8 --locale=C --no-instructions"
@@ -130,6 +181,7 @@ case "$1" in
       _spin "Updating Python packages" \
         _run "\"$D/venv/bin/pip\" install --no-index \
           --find-links=\"$D/wheels\" -r \"$D/requirements.txt\" -q" || true
+      _spin "Collecting static files" _collectstatic || true
 
       if [ -d /run/systemd/system ]; then
         systemctl stop dispatcharr 2>/dev/null || true
@@ -140,6 +192,15 @@ case "$1" in
 
       PGPORT=$(grep "^POSTGRES_PORT=" "$D/config/dispatcharr.env" 2>/dev/null \
         | cut -d= -f2 || echo 15432)
+
+      if [ -f "$STAGING/version" ]; then
+        OLD_VER=$(cat "$STAGING/version")
+        NEW_VER=$(ls "$D/share/postgresql/" 2>/dev/null | head -1)
+        if [ -n "$NEW_VER" ] && [ "$OLD_VER" != "$NEW_VER" ]; then
+          _spin "Upgrading PostgreSQL ${OLD_VER} to ${NEW_VER}" _pg_upgrade "$OLD_VER"
+        fi
+        rm -rf "$STAGING"
+      fi
 
       _spin "Starting database" \
         _run "\"$D/bin/pg_ctl\" -D \"$DATA/db\" \

@@ -1,4 +1,8 @@
 #!/bin/bash
+# dpkg pre-removal script. Runs BEFORE dpkg removes package files.
+#
+# remove|purge  Stop and disable the systemd service, then remove the
+#               /usr/share/postgresql/<ver> symlink we created in postinst.
 set -e
 
 D=/opt/dispatcharr

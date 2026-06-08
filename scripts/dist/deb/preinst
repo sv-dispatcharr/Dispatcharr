@@ -1,0 +1,34 @@
+#!/bin/bash
+# dpkg pre-installation script. Runs BEFORE dpkg replaces package files.
+#
+# upgrade <old-version>  Snapshot existing PG binaries, share dir, and libs to
+#                        .pg-upgrade-old/ so postinst can run pg_upgrade after
+#                        the new PG version is in place.
+# abort-upgrade          Rollback in progress; clean up the staging dir.
+set -e
+
+D=/opt/dispatcharr
+STAGING="$D/.pg-upgrade-old"
+
+case "$1" in
+  upgrade)
+    # Snapshot current PG binaries and share dir before dpkg replaces them.
+    # postinst compares old vs new bundled version and runs pg_upgrade if they differ.
+    if [ -f "$D/bin/postgres" ] && [ -d "$D/share/postgresql" ]; then
+      OLD_VER=$(ls "$D/share/postgresql/" 2>/dev/null | head -1)
+      if [ -n "$OLD_VER" ]; then
+        rm -rf "$STAGING"
+        mkdir -p "$STAGING/bin" "$STAGING/share"
+        for b in postgres pg_ctl pg_upgrade initdb pg_dump createdb pg_isready pg_dumpall psql; do
+          [ -f "$D/bin/$b" ] && cp "$D/bin/$b" "$STAGING/bin/"
+        done
+        cp -r "$D/share/postgresql/$OLD_VER" "$STAGING/share/"
+        cp -r "$D/lib" "$STAGING/"
+        echo "$OLD_VER" > "$STAGING/version"
+      fi
+    fi
+    ;;
+  abort-upgrade)
+    rm -rf "$STAGING"
+    ;;
+esac

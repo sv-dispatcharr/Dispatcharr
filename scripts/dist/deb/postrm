@@ -1,4 +1,8 @@
 #!/bin/bash
+# dpkg post-removal script. Runs AFTER dpkg removes package files.
+#
+# purge   Delete /opt/dispatcharr entirely (user data included) and reload systemd.
+# remove  Reload systemd to drop the now-absent unit file.
 set -e
 
 case "$1" in
