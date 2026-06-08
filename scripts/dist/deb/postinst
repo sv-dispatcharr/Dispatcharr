@@ -129,6 +129,9 @@ case "$1" in
       fi
     fi
 
+    # Remove stale VLC plugins cache so VLC regenerates it on first run
+    find "$D/lib/" -name "plugins.dat" -delete 2>/dev/null || true
+
     if [ -z "$2" ]; then
       # ── First install ──────────────────────────────────────────────────
 
@@ -212,7 +215,7 @@ case "$1" in
     if [ -d /run/systemd/system ]; then
       systemctl daemon-reload
       systemctl enable dispatcharr
-      systemctl start dispatcharr
+      systemctl start --no-block dispatcharr
     else
       "$D/dispatcharr" start 2>/dev/null || true
     fi

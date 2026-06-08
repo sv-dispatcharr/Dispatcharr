@@ -22,6 +22,11 @@ on:
         required: false
         type: string
         default: ""
+      publish_apt:
+        description: "Publish apt repository (requires APT_GPG_PRIVATE_KEY secret)"
+        required: false
+        type: string
+        default: 'false'
 
 env:
   NFPM_VERSION: "2.46.3"
@@ -31,44 +36,27 @@ permissions:
   packages: read
 
 jobs:
-  prepare-image:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: amd64
-            runner: ubuntu-24.04
-          - platform: arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+  update-prerelease:
+    if: inputs.release_tag == 'dev-dist'
+    runs-on: ubuntu-24.04
     steps:
-      - name: Download rootfs artifact
-        id: artifact
-        uses: actions/download-artifact@v8
+      - uses: actions/checkout@v6
         with:
-          name: rootfs-${{ matrix.platform }}
-        continue-on-error: true
+          fetch-depth: 1
 
-      - name: Pull Docker image (fallback if artifact unavailable)
-        if: steps.artifact.outcome == 'failure' && inputs.image_ref != ''
+      - name: Create or recreate dev-dist pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | \
-            docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          docker pull --platform linux/${{ matrix.platform }} "${{ inputs.image_ref }}"
-          CTNR=$(docker create "${{ inputs.image_ref }}")
-          docker export "$CTNR" > rootfs.tar
-          docker rm "$CTNR"
-
-      - name: Upload rootfs artifact
-        if: steps.artifact.outcome == 'failure' && inputs.image_ref != ''
-        uses: actions/upload-artifact@v7
-        with:
-          name: rootfs-${{ matrix.platform }}
-          path: rootfs.tar
-          retention-days: 1
+          gh release delete dev-dist --yes 2>/dev/null || true
+          git push origin :refs/tags/dev-dist 2>/dev/null || true
+          gh release create dev-dist \
+            --repo ${{ github.repository }} \
+            --target "${{ github.sha }}" \
+            --title "${{ inputs.version }}" \
+            --prerelease
 
   build-deb:
-    needs: [prepare-image]
     strategy:
       fail-fast: false
       matrix:
@@ -89,15 +77,16 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Download rootfs artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: rootfs-${{ matrix.platform }}
-
-      - name: Extract rootfs
+      - name: Pull Docker image and extract rootfs
         run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          IMAGE="${{ inputs.image_ref }}-${{ matrix.platform }}"
+          docker pull "$IMAGE"
+          CTNR=$(docker create "$IMAGE")
           mkdir rootfs
-          tar xf rootfs.tar -C rootfs/ 2>/dev/null || true
+          docker export "$CTNR" | tar x -C rootfs/ 2>/dev/null || true
+          docker rm "$CTNR"
 
       - name: Extract binaries and bundled .so dependencies
         run: |
@@ -122,6 +111,27 @@ jobs:
             exit 1
           fi
 
+          # VLC binary + arch-specific plugin modules
+          if [ -f "rootfs/usr/bin/vlc" ]; then
+            cp -L "rootfs/usr/bin/vlc" pkg/bin/
+          else
+            echo "ERROR: vlc binary not found in Docker rootfs" >&2
+            exit 1
+          fi
+          VLC_LIB_DIR="rootfs/usr/lib/${LIB}/vlc"
+          if [ -d "$VLC_LIB_DIR" ]; then
+            mkdir -p "pkg/lib/${LIB}/vlc"
+            cp -r "$VLC_LIB_DIR/." "pkg/lib/${LIB}/vlc/"
+            # Strip the build-time plugins cache; VLC regenerates it on first run
+            # with the correct installed paths. Shipping a stale one causes errors.
+            find "pkg/lib/${LIB}/vlc/" -name "plugins.dat" -delete 2>/dev/null || true
+          fi
+          # Synthesize cvlc rather than copying the rootfs shell script, which
+          # relies on PATH to find vlc and may reference /usr/bin/vlc directly.
+          # Using $(dirname "$0") makes it work regardless of how it is invoked.
+          printf '#!/bin/sh\nexec "$(dirname "$0")/vlc" --intf dummy --no-interact --no-dbus --aout dummy --vout dummy "$@"\n' \
+            > pkg/bin/cvlc
+
           cp -r rootfs/etc/nginx/. pkg/etc/nginx/
 
           # PostgreSQL share files (postgres.bki, timezone data, etc.)
@@ -142,18 +152,48 @@ jobs:
             exit 1
           fi
 
-          # Collect non-glibc .so deps from the Docker rootfs.
+          # Collect non-glibc .so deps from the Docker rootfs, transitively.
           # Use readelf (not ldd) so we get DT_NEEDED entries regardless of
           # whether the CI runner has the library installed.
+          # _copy_deps scans one file; the outer loop repeats on collected
+          # .so files until no new ones appear (handles indirect deps like
+          # libavfilter -> libplacebo).
+          # Some deps are absent from the Docker image and must be sourced elsewhere.
+          # For each: check the full rootfs first; fall back to system apt or Ubuntu archive.
+
+          # libidn.so.12 - VLC dep, removed from Ubuntu 24.04; fetch from Ubuntu 22.04 archive.
+          if find rootfs/ -name "libidn.so.12*" ! -type d 2>/dev/null | grep -q .; then
+            find rootfs/ -name "libidn.so.12*" ! -type d \
+              | while read -r f; do cp -L --update=none "$f" "pkg/lib/${LIB}/"; done
+          else
+            case "${LIB}" in
+              x86_64-linux-gnu)  _idnurl="http://archive.ubuntu.com/ubuntu/pool/main/libi/libidn/libidn11_1.33-2.2ubuntu2_amd64.deb" ;;
+              aarch64-linux-gnu) _idnurl="http://ports.ubuntu.com/ubuntu-ports/pool/main/libi/libidn/libidn11_1.33-2.2ubuntu2_arm64.deb" ;;
+            esac
+            curl -fsSL "$_idnurl" -o /tmp/libidn11.deb
+            dpkg -x /tmp/libidn11.deb /tmp/libidn11/
+            find /tmp/libidn11/ -name "libidn.so.12*" ! -type d \
+              | while read -r f; do cp -L "$f" "pkg/lib/${LIB}/"; done
+            rm -rf /tmp/libidn11.deb /tmp/libidn11/
+          fi
+
+          # libv4lconvert.so.0 - ffmpeg V4L2 dep, not installed in the Docker image.
+          if ! find rootfs/ -name "libv4lconvert.so*" ! -type d 2>/dev/null | grep -q .; then
+            sudo apt-get install -y --no-install-recommends libv4l-0
+            find /usr/lib/${LIB}/ -name "libv4l*.so*" ! -type d \
+              | while read -r f; do cp -L --update=none "$f" "pkg/lib/${LIB}/"; done
+          fi
+
           chmod +x pkg/bin/*
-          for bin in pkg/bin/*; do
-            readelf -d "$bin" 2>/dev/null \
+          _copy_deps() {
+            readelf -d "$1" 2>/dev/null \
               | awk '/NEEDED/{gsub(/\[|\]/,""); print $NF}' \
               | grep -Ev '^lib(c|m|dl|pthread|rt|gcc_s|stdc\+\+|gomp|resolv)\.so' \
               | grep -v 'ld-linux' \
               | while read -r libname; do
-                  find rootfs/usr/lib/${LIB}/ rootfs/usr/lib/ \
-                       rootfs/lib/${LIB}/      rootfs/lib/ \
+                  find rootfs/usr/local/lib/${LIB}/ rootfs/usr/local/lib/ \
+                       rootfs/usr/lib/${LIB}/       rootfs/usr/lib/ \
+                       rootfs/lib/${LIB}/            rootfs/lib/ \
                     -name "${libname}*" ! -type d 2>/dev/null \
                   | while read -r found; do
                       # -L dereferences symlinks so libpq.so.5 -> libpq.so.5.17
@@ -161,16 +201,35 @@ jobs:
                       cp -L --update=none "$found" "pkg/lib/${LIB}/" || true
                     done
                 done
+          }
+          for bin in pkg/bin/*; do _copy_deps "$bin"; done
+          # Iterate until no new .so files appear. Use find recursively so
+          # VLC plugin subdirectories (codec, demux, etc.) are scanned -
+          # the previous glob only hit the top level and missed plugin deps.
+          while true; do
+            n_before=$(find "pkg/lib/${LIB}/" -name "*.so*" ! -type d 2>/dev/null | wc -l)
+            while IFS= read -r so; do _copy_deps "$so"; done \
+              < <(find "pkg/lib/${LIB}/" -name "*.so" ! -type d 2>/dev/null)
+            n_after=$(find "pkg/lib/${LIB}/" -name "*.so*" ! -type d 2>/dev/null | wc -l)
+            if [ "$n_before" -eq "$n_after" ]; then break; fi
           done
 
       - name: Bundle Python and wheels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PBS_ARCH=${{ matrix.pbs_arch }}
-          PBS_URL=$(curl -s https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest \
+          PBS_URL=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest \
             | grep "browser_download_url" \
             | grep "cpython-3\.13" \
             | grep "${PBS_ARCH}-unknown-linux-gnu-install_only" \
+            | grep -v "stripped" \
             | head -1 | cut -d '"' -f 4)
+          if [ -z "$PBS_URL" ]; then
+            echo "ERROR: could not resolve PBS download URL for ${PBS_ARCH}" >&2
+            exit 1
+          fi
           curl -fsSL "$PBS_URL" | tar xz
           cp -a python/. pkg/python/
 
@@ -271,54 +330,33 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ inputs.release_tag }}" *.deb --clobber
 
-      - name: Upload .deb as workflow artifact
-        if: inputs.release_tag == ''
-        uses: actions/upload-artifact@v7
-        with:
-          name: dispatcharr-deb-${{ matrix.deb_arch }}
-          path: "*.deb"
-          retention-days: 7
-
   publish-apt-repo:
     needs: [build-deb]
-    # if: inputs.release_tag != ''  # uncomment and remove line below once APT_GPG_PRIVATE_KEY secret is added
-    if: false
+    if: needs.build-deb.result == 'success' && inputs.release_tag != '' && inputs.release_tag != 'dev-dist'
     runs-on: ubuntu-24.04
     steps:
-      - name: Install packaging tools
-        run: sudo apt-get install -y --no-install-recommends apt-utils dpkg-dev
-
-      - name: Download .deb files from release
+      - name: Publish APT repository
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APT_GPG_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
         run: |
+          if [ -z "$APT_GPG_KEY" ]; then
+            echo "APT_GPG_PRIVATE_KEY not configured, skipping APT publish"
+            exit 0
+          fi
+          sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils
           gh release download "${{ inputs.release_tag }}" \
             --repo ${{ github.repository }} \
             --pattern "*.deb" \
             --dir pool/
-
-      - name: Generate Packages index
-        run: |
           dpkg-scanpackages --multiversion pool/ \
             | sed 's|Filename: pool/|Filename: |' > pool/Packages
           gzip -k pool/Packages
-
-      - name: Generate and sign Release
-        env:
-          APT_GPG_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-        run: |
           echo "$APT_GPG_KEY" | gpg --batch --import
           gpg --batch --export --armor > pool/key.gpg
           apt-ftparchive release pool/ > pool/Release
           gpg --batch --yes --clearsign -o pool/InRelease pool/Release
-          gpg --batch --yes -abs         -o pool/Release.gpg pool/Release
-
-      - name: Upload apt index to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
           gh release upload "${{ inputs.release_tag }}" \
-            pool/Packages pool/Packages.gz \
-            pool/Release pool/InRelease pool/Release.gpg \
-            pool/key.gpg \
+            --repo ${{ github.repository }} \
+            pool/Packages.gz pool/InRelease pool/key.gpg \
             --clobber

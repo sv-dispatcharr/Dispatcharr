@@ -16,6 +16,8 @@ esac
 
 export PATH="$D/bin:$D/venv/bin:$PATH"
 export LD_LIBRARY_PATH="$D/lib/${LIB_ARCH}:$D/python/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export VLC_PLUGIN_PATH="$D/lib/${LIB_ARCH}/vlc/plugins"
+export VLC_DATA_PATH="$D/lib/${LIB_ARCH}/vlc"
 export VIRTUAL_ENV="$D/venv"
 export PYTHONPATH="$D/app"
 export DJANGO_SETTINGS_MODULE=dispatcharr.settings
@@ -43,6 +45,8 @@ start() {
   umask 022
   mkdir -p "$RUN" "$DATA/logs" \
     "$DATA/tmp/nginx/"{client_body,proxy,fastcgi,uwsgi,scgi}
+  touch "$DATA/logs/postgres.log" "$DATA/logs/redis.log" \
+        "$DATA/logs/nginx-error.log" "$DATA/logs/uwsgi.log"
   pg_ctl -D "$DATA/db" -l "$DATA/logs/postgres.log" \
     -o "-p $POSTGRES_PORT" start
   redis-server "$D/config/redis.conf"
@@ -83,7 +87,7 @@ status() {
 case "${1:-}" in
   start|stop|restart)
     if [ "$(id -u)" -eq 0 ]; then
-      exec runuser -s /bin/bash -u dispatcharr -m -- "$0" "$@"
+      exec runuser -u dispatcharr -- "$0" "$@"
     elif [ "$(id -un)" != "dispatcharr" ]; then
       echo "error: must be run as root or the dispatcharr user" >&2
       exit 1

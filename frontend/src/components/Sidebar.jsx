@@ -27,6 +27,7 @@ import {
 import {
   SiUbuntu,
   SiDebian,
+  SiRaspberrypi,
   SiDocker,
   SiFedora,
   SiArchlinux,
@@ -43,9 +44,10 @@ import UserForm from './forms/User';
 import NotificationCenter from './NotificationCenter';
 
 const INSTALL_ICON_MAP = {
-  ubuntu: SiUbuntu,
-  debian: SiDebian,
-  docker: SiDocker,
+  ubuntu:    SiUbuntu,
+  raspberry: SiRaspberrypi,
+  debian:    SiDebian,
+  docker:    SiDocker,
   fedora: SiFedora,
   arch:   SiArchlinux,
   alpine: SiAlpinelinux,

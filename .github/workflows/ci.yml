@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       build_packages:
-        description: "Build and publish distribution packages"
+        description: "Build and publish distributable packages (.deb)"
         type: boolean
         default: false
 
@@ -116,9 +116,6 @@ jobs:
             echo "is_bot=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
         with:
@@ -133,6 +130,9 @@ jobs:
           registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
       - name: Extract metadata for Docker
         id: meta
@@ -181,31 +181,6 @@ jobs:
             REPO_URL=https://github.com/${{ github.repository }}
             TIMESTAMP=${{ needs.prepare.outputs.timestamp }}
           file: ./docker/Dockerfile
-          cache-from: type=gha,scope=${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
-
-      - name: Export rootfs from BuildKit cache
-        if: github.event_name != 'pull_request'
-        run: |
-          docker buildx build \
-            --platform linux/${{ matrix.platform }} \
-            --output type=tar,dest=rootfs.tar \
-            --build-arg REPO_OWNER=${{ needs.prepare.outputs.repo_owner }} \
-            --build-arg REPO_NAME=${{ needs.prepare.outputs.repo_name }} \
-            --build-arg BASE_TAG=base \
-            --build-arg BRANCH=${{ github.ref_name }} \
-            --build-arg REPO_URL=https://github.com/${{ github.repository }} \
-            --build-arg TIMESTAMP=${{ needs.prepare.outputs.timestamp }} \
-            --file ./docker/Dockerfile \
-            .
-
-      - name: Upload rootfs artifact
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v7
-        with:
-          name: rootfs-${{ matrix.platform }}
-          path: rootfs.tar
-          retention-days: 1
 
   create-manifest:
     # wait for prepare and all matrix builds to finish
@@ -286,6 +261,8 @@ jobs:
     # if: github.event_name == 'workflow_dispatch' && inputs.build_packages == true
     uses: ./.github/workflows/dist.yml
     with:
-      version: ${{ needs.prepare.outputs.dist_version }}
+      version: ${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.timestamp }}
       ref: ${{ github.ref_name }}
+      release_tag: dev-dist
+      image_ref: ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.branch_tag }}
     secrets: inherit
