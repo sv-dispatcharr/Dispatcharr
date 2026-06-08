@@ -278,3 +278,47 @@ jobs:
           name: dispatcharr-deb-${{ matrix.deb_arch }}
           path: "*.deb"
           retention-days: 7
+
+  publish-apt-repo:
+    needs: [build-deb]
+    # if: inputs.release_tag != ''  # uncomment and remove line below once APT_GPG_PRIVATE_KEY secret is added
+    if: false
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install packaging tools
+        run: sudo apt-get install -y --no-install-recommends apt-utils dpkg-dev
+
+      - name: Download .deb files from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ inputs.release_tag }}" \
+            --repo ${{ github.repository }} \
+            --pattern "*.deb" \
+            --dir pool/
+
+      - name: Generate Packages index
+        run: |
+          dpkg-scanpackages --multiversion pool/ \
+            | sed 's|Filename: pool/|Filename: |' > pool/Packages
+          gzip -k pool/Packages
+
+      - name: Generate and sign Release
+        env:
+          APT_GPG_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          echo "$APT_GPG_KEY" | gpg --batch --import
+          gpg --batch --export --armor > pool/key.gpg
+          apt-ftparchive release pool/ > pool/Release
+          gpg --batch --yes --clearsign -o pool/InRelease pool/Release
+          gpg --batch --yes -abs         -o pool/Release.gpg pool/Release
+
+      - name: Upload apt index to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ inputs.release_tag }}" \
+            pool/Packages pool/Packages.gz \
+            pool/Release pool/InRelease pool/Release.gpg \
+            pool/key.gpg \
+            --clobber
