@@ -241,10 +241,12 @@ describe('useSettingsStore', () => {
     expect(result.current.version).toEqual({
       version: '1.2.3',
       timestamp: '2024-01-01T00:00:00Z',
+      install_method: null,
     });
     expect(versionResult).toEqual({
       version: '1.2.3',
       timestamp: '2024-01-01T00:00:00Z',
+      install_method: null,
     });
   });
 
@@ -291,6 +293,7 @@ describe('useSettingsStore', () => {
     expect(result.current.version).toEqual({
       version: '',
       timestamp: null,
+      install_method: null,
     });
   });
 
@@ -330,6 +333,7 @@ describe('useSettingsStore', () => {
     expect(result.current.version).toEqual({
       version: '1.0.0',
       timestamp: '2024-01-01T00:00:00Z',
+      install_method: null,
     });
   });
 

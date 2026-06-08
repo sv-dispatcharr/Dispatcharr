@@ -12,6 +12,10 @@ on:
           - major
           - minor
           - patch
+      build_packages:
+        description: 'Build and publish distributable packages (.deb, APT repo)'
+        type: boolean
+        default: true
 
 # Add explicit permissions for the workflow
 permissions:
@@ -27,6 +31,7 @@ jobs:
       repo_owner: ${{ steps.meta.outputs.repo_owner }}
       repo_name: ${{ steps.meta.outputs.repo_name }}
       timestamp: ${{ steps.timestamp.outputs.timestamp }}
+      publish_apt: ${{ steps.gpg.outputs.publish_apt }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -64,6 +69,17 @@ jobs:
           TIMESTAMP=$(date -u +'%Y%m%d%H%M%S')
           echo "timestamp=${TIMESTAMP}" >> $GITHUB_OUTPUT
 
+      - name: Check APT signing key
+        id: gpg
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APT_GPG_PRIVATE_KEY" ]; then
+            echo "publish_apt=true" >> $GITHUB_OUTPUT
+          else
+            echo "publish_apt=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Commit and Tag
         run: |
           git add version.py CHANGELOG.md
@@ -95,9 +111,6 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
         with:
@@ -111,6 +124,9 @@ jobs:
           registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
       - name: Extract metadata for Docker
         id: meta
@@ -153,32 +169,10 @@ jobs:
             REPO_URL=https://github.com/${{ github.repository }}
           file: ./docker/Dockerfile
 
-      - name: Export rootfs from BuildKit cache
-        run: |
-          docker buildx build \
-            --platform linux/${{ matrix.platform }} \
-            --output type=tar,dest=rootfs.tar \
-            --build-arg REPO_OWNER=${{ needs.prepare.outputs.repo_owner }} \
-            --build-arg REPO_NAME=${{ needs.prepare.outputs.repo_name }} \
-            --build-arg BRANCH=${{ github.ref_name }} \
-            --build-arg REPO_URL=https://github.com/${{ github.repository }} \
-            --file ./docker/Dockerfile \
-            .
-
-      - name: Upload rootfs artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: rootfs-${{ matrix.platform }}
-          path: rootfs.tar
-          retention-days: 1
-
   create-manifest:
     needs: [prepare, docker]
     runs-on: ubuntu-24.04
     steps:
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
         with:
@@ -192,6 +186,9 @@ jobs:
           registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
       - name: Create multi-arch manifest tags
         run: |
@@ -258,10 +255,12 @@ jobs:
 
   dist:
     needs: [prepare, create-release]
+    if: inputs.build_packages
     uses: ./.github/workflows/dist.yml
     with:
       version: ${{ needs.prepare.outputs.new_version }}
       image_ref: ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.new_version }}
       release_tag: v${{ needs.prepare.outputs.new_version }}
       ref: main
+      publish_apt: ${{ needs.prepare.outputs.publish_apt == 'true' }}
     secrets: inherit
