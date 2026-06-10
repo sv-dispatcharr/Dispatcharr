@@ -178,8 +178,11 @@ jobs:
           fi
 
           # libv4lconvert.so.0 - ffmpeg V4L2 dep, not installed in the Docker image.
+          # libv4lconvert is a separate package from libv4l-0; on Ubuntu 24.04 it is
+          # libv4lconvert0t64 (64-bit time_t rename), on older releases libv4lconvert0.
           if ! find rootfs/ -name "libv4lconvert.so*" ! -type d 2>/dev/null | grep -q .; then
-            sudo apt-get install -y --no-install-recommends libv4l-0
+            sudo apt-get install -y --no-install-recommends libv4l-0 libv4lconvert0t64 2>/dev/null || \
+              sudo apt-get install -y --no-install-recommends libv4l-0 libv4lconvert0
             find /usr/lib/${LIB}/ -name "libv4l*.so*" ! -type d \
               | while read -r f; do cp -L --update=none "$f" "pkg/lib/${LIB}/"; done
           fi
@@ -356,7 +359,8 @@ jobs:
           gpg --batch --export --armor > pool/key.gpg
           apt-ftparchive release pool/ > pool/Release
           gpg --batch --yes --clearsign -o pool/InRelease pool/Release
+          cp scripts/dist/deb/setup.sh pool/setup.sh
           gh release upload "${{ inputs.release_tag }}" \
             --repo ${{ github.repository }} \
-            pool/Packages.gz pool/InRelease pool/key.gpg \
+            pool/Packages.gz pool/InRelease pool/key.gpg pool/setup.sh \
             --clobber

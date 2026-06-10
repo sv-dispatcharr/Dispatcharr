@@ -173,19 +173,21 @@ on every release and uploads five files to the same release:
   with the GPG key stored as `APT_GPG_PRIVATE_KEY` in Actions secrets
 
 The user source line never changes across releases:
+```bash
+# Add the repository (imports key, writes sources.list.d entry, runs apt update)
+curl -fsSL https://github.com/Dispatcharr/Dispatcharr/releases/latest/download/setup.sh \
+  | sudo bash
+
+# Install / upgrade
+sudo apt install dispatcharr
 ```
-# Add the signing key
-curl -fsSL \
-  https://github.com/Dispatcharr/Dispatcharr/releases/latest/download/key.gpg \
-  | sudo gpg --dearmor -o /etc/apt/keyrings/dispatcharr.gpg
 
-# Add the release source
-echo "deb [signed-by=/etc/apt/keyrings/dispatcharr.gpg] \
-  https://github.com/Dispatcharr/Dispatcharr/releases/latest/download/ ./" \
-  | sudo tee /etc/apt/sources.list.d/dispatcharr.list
-
-# Install/update
-sudo apt update && sudo apt install dispatcharr
+`setup.sh` is uploaded to every release alongside `Packages.gz`, `InRelease`, and `key.gpg`
+by the `publish-apt-repo` CI job. It is a thin wrapper around:
+```
+gpg --dearmor key.gpg → /etc/apt/keyrings/dispatcharr.gpg
+echo "deb [signed-by=…] …" → /etc/apt/sources.list.d/dispatcharr.list
+apt-get update (the new source only)
 ```
 
 **To enable:**
