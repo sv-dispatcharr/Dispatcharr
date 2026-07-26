@@ -25,7 +25,14 @@ from .serializers import (
     VODLogoSerializer,
     M3UMovieRelationSerializer,
     M3USeriesRelationSerializer,
-    M3UEpisodeRelationSerializer
+    M3UEpisodeRelationSerializer,
+    EpisodeWithProvidersSerializer,
+    MovieProviderInfoSerializer,
+    SeriesProviderInfoSerializer,
+    UnifiedContentListSerializer,
+    VODLogoBulkDeleteRequestSerializer,
+    VODLogoBulkDeleteResponseSerializer,
+    VODLogoCleanupResponseSerializer,
 )
 from .image_proxy import (
     is_proxyable_image_url,
@@ -43,6 +50,8 @@ from .tasks import refresh_series_episodes, refresh_movie_advanced_data
 from .utils import is_vod_movies_enabled, is_vod_series_enabled
 from django.utils import timezone
 from datetime import timedelta
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
+from drf_spectacular.types import OpenApiTypes
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +137,7 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(is_adult=False)
         return qs
 
+    @extend_schema(responses=M3UMovieRelationSerializer(many=True))
     @action(detail=True, methods=['get'], url_path='providers')
     def get_providers(self, request, pk=None):
         """Get all providers (M3U accounts) that have this movie"""
@@ -141,6 +151,29 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(serializer.data)
 
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='relation_id',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Specific M3U movie relation ID to use',
+            ),
+            OpenApiParameter(
+                name='force_refresh',
+                type=OpenApiTypes.BOOL,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Force refresh of advanced provider data',
+            ),
+        ],
+        responses={
+            200: MovieProviderInfoSerializer,
+            400: OpenApiResponse(description='Invalid relation or no active provider'),
+            404: OpenApiResponse(description='Relation not found or not active'),
+        },
+    )
     @action(detail=True, methods=['get'], url_path='provider-info')
     def provider_info(self, request, pk=None):
         """Get detailed movie information from the original provider, throttled to 24h."""
@@ -381,6 +414,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
             m3u_relations__m3u_account__is_active=True
         ).distinct().select_related('logo').prefetch_related('m3u_relations__m3u_account')
 
+    @extend_schema(responses=M3USeriesRelationSerializer(many=True))
     @action(detail=True, methods=['get'], url_path='providers')
     def get_providers(self, request, pk=None):
         """Get all providers (M3U accounts) that have this series"""
@@ -393,6 +427,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
         serializer = M3USeriesRelationSerializer(relations, many=True)
         return Response(serializer.data)
 
+    @extend_schema(responses=EpisodeWithProvidersSerializer(many=True))
     @action(detail=True, methods=['get'], url_path='episodes')
     def get_episodes(self, request, pk=None):
         """Get episodes for this series with provider information"""
@@ -417,6 +452,44 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response(episodes_data)
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='relation_id',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Specific M3U series relation ID to use',
+            ),
+            OpenApiParameter(
+                name='force_refresh',
+                type=OpenApiTypes.BOOL,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Force refresh of series/episode data from provider',
+            ),
+            OpenApiParameter(
+                name='refresh_interval',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Hours before provider data is considered stale (default 24)',
+            ),
+            OpenApiParameter(
+                name='include_episodes',
+                type=OpenApiTypes.BOOL,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description='Include episodes grouped by season (default true)',
+            ),
+        ],
+        responses={
+            200: SeriesProviderInfoSerializer,
+            400: OpenApiResponse(description='Invalid relation or no active provider'),
+            404: OpenApiResponse(description='Relation not found or not active'),
+            500: OpenApiResponse(description='Failed to fetch series information'),
+        },
+    )
     @action(detail=True, methods=['get'], url_path='provider-info')
     def series_info(self, request, pk=None):
         """Get detailed series information, refreshing from provider if needed"""
@@ -750,6 +823,36 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
         except KeyError:
             return [Authenticated()]
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='category',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+                description="Category filter. Supports 'name' or 'name|movie' / 'name|series'",
+            ),
+            OpenApiParameter(
+                name='search',
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                required=False,
+            ),
+            OpenApiParameter(
+                name='page',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+            ),
+            OpenApiParameter(
+                name='page_size',
+                type=OpenApiTypes.INT,
+                location=OpenApiParameter.QUERY,
+                required=False,
+            ),
+        ],
+        responses=UnifiedContentListSerializer,
+    )
     def list(self, request, *args, **kwargs):
         """Override list to handle unified content properly - database-level approach"""
         import logging
@@ -1060,12 +1163,27 @@ class VODLogoViewSet(viewsets.ModelViewSet):
 
         return queryset
 
+    @extend_schema(
+        responses={
+            (200, 'image/*'): OpenApiTypes.BINARY,
+            404: OpenApiResponse(description='Logo not found or unreachable'),
+            500: OpenApiResponse(description='Error serving logo file'),
+        },
+    )
     @action(detail=True, methods=["get"], permission_classes=[AllowAny])
     def cache(self, request, pk=None):
         """Streams the VOD logo file, whether it's local or remote."""
         logo = self.get_object()
         return serve_vod_image(logo.url)
 
+    @extend_schema(
+        request=VODLogoBulkDeleteRequestSerializer,
+        responses={
+            200: VODLogoBulkDeleteResponseSerializer,
+            400: OpenApiResponse(description='No logo IDs provided'),
+            500: OpenApiResponse(description='Bulk delete failed'),
+        },
+    )
     @action(detail=False, methods=["delete"], url_path="bulk-delete")
     def bulk_delete(self, request):
         """Delete multiple VOD logos at once"""
@@ -1096,6 +1214,13 @@ class VODLogoViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    @extend_schema(
+        request=None,
+        responses={
+            200: VODLogoCleanupResponseSerializer,
+            500: OpenApiResponse(description='Cleanup failed'),
+        },
+    )
     @action(detail=False, methods=["post"])
     def cleanup(self, request):
         """Delete all VOD logos that are not used by any movies or series"""

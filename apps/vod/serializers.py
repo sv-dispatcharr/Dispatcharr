@@ -10,6 +10,20 @@ from .models import (
 from apps.m3u.serializers import M3UAccountSerializer
 
 
+class QualityInfoSerializer(serializers.Serializer):
+    """Optional quality metadata derived from provider/custom properties."""
+    quality = serializers.CharField(required=False, allow_blank=True)
+    resolution = serializers.CharField(required=False, allow_blank=True)
+    bitrate = serializers.CharField(required=False, allow_blank=True)
+
+
+class VODProviderAccountSerializer(serializers.Serializer):
+    """Slim M3U account payload embedded in provider-info responses."""
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+    account_type = serializers.CharField()
+
+
 class VODLogoSerializer(serializers.ModelSerializer):
     name = serializers.CharField()
     cache_url = serializers.SerializerMethodField()
@@ -116,9 +130,13 @@ class VODCategorySerializer(serializers.ModelSerializer):
             "m3u_accounts",
         ]
 
+
 class SeriesSerializer(serializers.ModelSerializer):
     logo = VODLogoSerializer(read_only=True)
-    episode_count = serializers.IntegerField(read_only=True, help_text="Number of episodes in the series")
+    episode_count = serializers.SerializerMethodField(
+        help_text="Number of episodes in the series"
+    )
+    custom_properties = serializers.JSONField(required=False, allow_null=True)
 
     class Meta:
         model = Series
@@ -131,6 +149,7 @@ class SeriesSerializer(serializers.ModelSerializer):
 
 class MovieSerializer(serializers.ModelSerializer):
     logo = VODLogoSerializer(read_only=True)
+    custom_properties = serializers.JSONField(required=False, allow_null=True)
 
     class Meta:
         model = Movie
@@ -139,6 +158,7 @@ class MovieSerializer(serializers.ModelSerializer):
 
 class EpisodeSerializer(serializers.ModelSerializer):
     series = SeriesSerializer(read_only=True)
+    custom_properties = serializers.JSONField(required=False, allow_null=True)
 
     class Meta:
         model = Episode
@@ -149,6 +169,7 @@ class M3USeriesRelationSerializer(serializers.ModelSerializer):
     series = SeriesSerializer(read_only=True)
     category = VODCategorySerializer(read_only=True)
     m3u_account = M3UAccountSerializer(read_only=True)
+    custom_properties = serializers.JSONField(required=False, allow_null=True)
 
     class Meta:
         model = M3USeriesRelation
@@ -160,11 +181,13 @@ class M3UMovieRelationSerializer(serializers.ModelSerializer):
     category = VODCategorySerializer(read_only=True)
     m3u_account = M3UAccountSerializer(read_only=True)
     quality_info = serializers.SerializerMethodField()
+    custom_properties = serializers.JSONField(required=False, allow_null=True)
 
     class Meta:
         model = M3UMovieRelation
         fields = '__all__'
 
+    @extend_schema_field(QualityInfoSerializer(allow_null=True))
     def get_quality_info(self, obj):
         """Extract quality information from various sources"""
         quality_info = {}
@@ -237,11 +260,13 @@ class M3UEpisodeRelationSerializer(serializers.ModelSerializer):
     episode = EpisodeSerializer(read_only=True)
     m3u_account = M3UAccountSerializer(read_only=True)
     quality_info = serializers.SerializerMethodField()
+    custom_properties = serializers.JSONField(required=False, allow_null=True)
 
     class Meta:
         model = M3UEpisodeRelation
         fields = '__all__'
 
+    @extend_schema_field(QualityInfoSerializer(allow_null=True))
     def get_quality_info(self, obj):
         """Extract quality information from various sources"""
         quality_info = {}
@@ -314,7 +339,10 @@ class EnhancedSeriesSerializer(serializers.ModelSerializer):
     """Enhanced serializer for series with provider information"""
     logo = VODLogoSerializer(read_only=True)
     providers = M3USeriesRelationSerializer(source='m3u_relations', many=True, read_only=True)
-    episode_count = serializers.IntegerField(read_only=True, help_text="Number of episodes in the series")
+    episode_count = serializers.SerializerMethodField(
+        help_text="Number of episodes in the series"
+    )
+    custom_properties = serializers.JSONField(required=False, allow_null=True)
 
     class Meta:
         model = Series
@@ -323,3 +351,155 @@ class EnhancedSeriesSerializer(serializers.ModelSerializer):
     @extend_schema_field(OpenApiTypes.INT)
     def get_episode_count(self, obj):
         return obj.episodes.count()
+
+
+class EpisodeWithProvidersSerializer(EpisodeSerializer):
+    """Episode payload with nested provider relations (series episodes action)."""
+    providers = M3UEpisodeRelationSerializer(many=True, read_only=True)
+
+
+class MovieProviderInfoSerializer(serializers.Serializer):
+    """Response shape for GET /api/vod/movies/{id}/provider-info/."""
+    id = serializers.IntegerField()
+    uuid = serializers.UUIDField()
+    stream_id = serializers.CharField()
+    name = serializers.CharField()
+    o_name = serializers.CharField(allow_blank=True)
+    description = serializers.CharField(allow_blank=True, allow_null=True)
+    plot = serializers.CharField(allow_blank=True, allow_null=True)
+    year = serializers.IntegerField(allow_null=True)
+    release_date = serializers.CharField(allow_blank=True)
+    genre = serializers.CharField(allow_blank=True)
+    director = serializers.CharField(allow_blank=True)
+    actors = serializers.CharField(allow_blank=True)
+    country = serializers.CharField(allow_blank=True)
+    rating = serializers.CharField(allow_blank=True, allow_null=True)
+    tmdb_id = serializers.CharField(allow_blank=True, allow_null=True)
+    imdb_id = serializers.CharField(allow_blank=True, allow_null=True)
+    youtube_trailer = serializers.CharField(allow_blank=True)
+    duration_secs = serializers.IntegerField(allow_null=True)
+    age = serializers.CharField(allow_blank=True)
+    backdrop_path = serializers.JSONField()
+    cover = serializers.CharField(allow_blank=True)
+    cover_big = serializers.CharField(allow_blank=True)
+    movie_image = serializers.CharField(allow_blank=True)
+    bitrate = serializers.IntegerField()
+    video = serializers.JSONField()
+    audio = serializers.JSONField()
+    container_extension = serializers.CharField()
+    direct_source = serializers.CharField(allow_blank=True)
+    category_id = serializers.CharField(allow_blank=True)
+    added = serializers.CharField(allow_blank=True)
+    m3u_account = VODProviderAccountSerializer()
+
+
+class SeriesProviderInfoCoverSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    url = serializers.CharField()
+    name = serializers.CharField()
+
+
+class SeriesProviderInfoEpisodeSeriesSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+
+
+class SeriesProviderInfoEpisodeSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    uuid = serializers.UUIDField()
+    name = serializers.CharField()
+    title = serializers.CharField()
+    episode_number = serializers.IntegerField(allow_null=True)
+    season_number = serializers.IntegerField(allow_null=True)
+    description = serializers.CharField(allow_blank=True, allow_null=True)
+    air_date = serializers.DateField(allow_null=True)
+    plot = serializers.CharField(allow_blank=True, allow_null=True)
+    duration_secs = serializers.IntegerField(allow_null=True)
+    rating = serializers.CharField(allow_blank=True, allow_null=True)
+    tmdb_id = serializers.CharField(allow_blank=True, allow_null=True)
+    imdb_id = serializers.CharField(allow_blank=True, allow_null=True)
+    movie_image = serializers.CharField(allow_blank=True)
+    container_extension = serializers.CharField()
+    type = serializers.CharField()
+    series = SeriesProviderInfoEpisodeSeriesSerializer()
+
+
+class SeriesProviderInfoSerializer(serializers.Serializer):
+    """Response shape for GET /api/vod/series/{id}/provider-info/."""
+    id = serializers.IntegerField()
+    series_id = serializers.CharField()
+    name = serializers.CharField()
+    description = serializers.CharField(allow_blank=True, allow_null=True)
+    year = serializers.IntegerField(allow_null=True)
+    genre = serializers.CharField(allow_blank=True, allow_null=True)
+    rating = serializers.CharField(allow_blank=True, allow_null=True)
+    tmdb_id = serializers.CharField(allow_blank=True, allow_null=True)
+    imdb_id = serializers.CharField(allow_blank=True, allow_null=True)
+    category_id = serializers.IntegerField(allow_null=True)
+    category_name = serializers.CharField(allow_null=True)
+    cover = SeriesProviderInfoCoverSerializer(allow_null=True)
+    last_refreshed = serializers.DateTimeField()
+    custom_properties = serializers.JSONField(allow_null=True)
+    m3u_account = VODProviderAccountSerializer()
+    episodes_fetched = serializers.BooleanField()
+    detailed_fetched = serializers.BooleanField()
+    # Keys are season numbers as strings; values are episode lists.
+    episodes = serializers.DictField(
+        child=SeriesProviderInfoEpisodeSerializer(many=True),
+        required=False,
+    )
+
+
+class UnifiedContentLogoSerializer(serializers.Serializer):
+    """Logo shape returned by the unified content SQL list endpoint."""
+    id = serializers.IntegerField()
+    name = serializers.CharField(allow_null=True)
+    url = serializers.CharField(allow_null=True)
+    cache_url = serializers.CharField()
+    movie_count = serializers.IntegerField()
+    series_count = serializers.IntegerField()
+    is_used = serializers.BooleanField()
+
+
+class UnifiedContentItemSerializer(serializers.Serializer):
+    """Single row from GET /api/vod/all/."""
+    id = serializers.IntegerField()
+    uuid = serializers.CharField()
+    name = serializers.CharField()
+    description = serializers.CharField(allow_blank=True)
+    year = serializers.IntegerField(allow_null=True)
+    # Unified list coerces rating to float; standard Movie/Series keep string.
+    rating = serializers.FloatField()
+    genre = serializers.CharField(allow_blank=True)
+    duration = serializers.IntegerField(allow_null=True)
+    created_at = serializers.CharField(allow_null=True)
+    updated_at = serializers.CharField(allow_null=True)
+    custom_properties = serializers.JSONField()
+    logo = UnifiedContentLogoSerializer(allow_null=True)
+    content_type = serializers.ChoiceField(choices=["movie", "series"])
+
+
+class UnifiedContentListSerializer(serializers.Serializer):
+    """Paginated payload from GET /api/vod/all/ (next/previous are booleans)."""
+    count = serializers.IntegerField()
+    next = serializers.BooleanField()
+    previous = serializers.BooleanField()
+    results = UnifiedContentItemSerializer(many=True)
+
+
+class VODLogoBulkDeleteRequestSerializer(serializers.Serializer):
+    logo_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        help_text="IDs of VOD logos to delete",
+    )
+
+
+class VODLogoBulkDeleteResponseSerializer(serializers.Serializer):
+    deleted_count = serializers.IntegerField()
+    message = serializers.CharField()
+
+
+class VODLogoCleanupResponseSerializer(serializers.Serializer):
+    deleted_count = serializers.IntegerField()
+    deleted_logos = serializers.ListField(child=serializers.CharField())
+    message = serializers.CharField()
