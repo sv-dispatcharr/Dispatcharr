@@ -340,9 +340,10 @@ class EpisodeViewSet(viewsets.ReadOnlyModelViewSet):
         if not is_vod_series_enabled(user=user):
             return Episode.objects.none()
 
-        return Episode.objects.select_related('series').filter(
+        # Only return episodes that have active M3U relations
+        return Episode.objects.filter(
             m3u_relations__m3u_account__is_active=True
-        ).distinct()
+        ).distinct().select_related('series').prefetch_related('m3u_relations__m3u_account')
 
     @action(detail=True, methods=['get'], url_path='image', permission_classes=[AllowAny])
     def image(self, request, pk=None):
@@ -642,7 +643,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
 class VODCategoryFilter(django_filters.FilterSet):
     name = django_filters.CharFilter(lookup_expr="icontains")
     category_type = django_filters.ChoiceFilter(choices=VODCategory.CATEGORY_TYPE_CHOICES)
-    m3u_account = django_filters.NumberFilter(field_name="m3u_account__id")
+    m3u_account = django_filters.NumberFilter(field_name="m3u_relations__m3u_account__id")
 
     class Meta:
         model = VODCategory
