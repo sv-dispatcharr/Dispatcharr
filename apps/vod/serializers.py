@@ -13,10 +13,18 @@ from apps.m3u.serializers import M3UAccountSerializer
 class VODLogoSerializer(serializers.ModelSerializer):
     name = serializers.CharField()
     cache_url = serializers.SerializerMethodField()
-    movie_count = serializers.IntegerField(read_only=True, help_text="Number of movies using this logo")
-    series_count = serializers.IntegerField(read_only=True, help_text="Number of series using this logo")
-    is_used = serializers.BooleanField(read_only=True, help_text="Whether this logo is used by any movie or series")
-    item_names = serializers.ListField(child=serializers.CharField(), read_only=True, help_text="List of movies and series using this logo (limited to 10)")
+    movie_count = serializers.SerializerMethodField(
+        help_text="Number of movies using this logo"
+    )
+    series_count = serializers.SerializerMethodField(
+        help_text="Number of series using this logo"
+    )
+    is_used = serializers.SerializerMethodField(
+        help_text="Whether this logo is used by any movie or series"
+    )
+    item_names = serializers.SerializerMethodField(
+        help_text="List of movies and series using this logo (limited to 10)"
+    )
 
     class Meta:
         model = VODLogo
@@ -50,6 +58,7 @@ class VODLogoSerializer(serializers.ModelSerializer):
         instance.save()
         return instance
 
+    @extend_schema_field(OpenApiTypes.URI)
     def get_cache_url(self, obj):
         return vodlogo_cache_url(self.context.get("request"), obj)
 
@@ -68,7 +77,7 @@ class VODLogoSerializer(serializers.ModelSerializer):
         """Check if this logo is used by any movies or series"""
         return (hasattr(obj, 'movie') and obj.movie.exists()) or (hasattr(obj, 'series') and obj.series.exists())
 
-    @extend_schema_field(OpenApiTypes.STR, many=True)
+    @extend_schema_field(serializers.ListField(child=serializers.CharField()))
     def get_item_names(self, obj):
         """Get the list of movies and series using this logo"""
         names = []
