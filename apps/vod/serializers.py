@@ -472,18 +472,18 @@ class UnifiedContentItemSerializer(serializers.Serializer):
     rating = serializers.FloatField()
     genre = serializers.CharField(allow_blank=True)
     duration = serializers.IntegerField(allow_null=True)
-    created_at = serializers.CharField(allow_null=True)
-    updated_at = serializers.CharField(allow_null=True)
+    created_at = serializers.DateTimeField(allow_null=True)
+    updated_at = serializers.DateTimeField(allow_null=True)
     custom_properties = serializers.JSONField()
     logo = UnifiedContentLogoSerializer(allow_null=True)
     content_type = serializers.ChoiceField(choices=["movie", "series"])
 
 
 class UnifiedContentListSerializer(serializers.Serializer):
-    """Paginated payload from GET /api/vod/all/ (next/previous are booleans)."""
+    """Paginated payload from GET /api/vod/all/ (standard next/previous page URIs)."""
     count = serializers.IntegerField()
-    next = serializers.BooleanField()
-    previous = serializers.BooleanField()
+    next = serializers.CharField(allow_null=True)
+    previous = serializers.CharField(allow_null=True)
     results = UnifiedContentItemSerializer(many=True)
 
 
