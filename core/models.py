@@ -1,7 +1,6 @@
 # core/models.py
 
 import logging
-import os
 import time
 from shlex import split as shlex_split
 
@@ -787,7 +786,7 @@ class CoreSettings(models.Model):
             "log_max_mb": 10,
             "log_keep": 5,
             "log_persist": True,
-            "plugin_dedicated_worker": False,
+            "celery_max_workers": 8,
         })
 
     @classmethod
@@ -797,15 +796,13 @@ class CoreSettings(models.Model):
         return cls.get_system_settings().get("catchup_enabled", True) is not False
 
     @classmethod
-    def get_plugin_dedicated_worker_enabled(cls):
-        """Whether plugin actions route through the plugins queue (default off).
-        DISPATCHARR_PLUGIN_DEDICATED_WORKER, if set, overrides the stored value."""
-        env_value = os.environ.get("DISPATCHARR_PLUGIN_DEDICATED_WORKER", "").strip().lower()
-        if env_value in ("true", "1", "yes"):
-            return True
-        if env_value in ("false", "0", "no"):
-            return False
-        return cls.get_system_settings().get("plugin_dedicated_worker", False) is True
+    def get_celery_max_workers(cls):
+        """Autoscale ceiling for the default Celery worker (handles core
+        tasks and plugin tasks alike)."""
+        try:
+            return int(cls.get_system_settings().get("celery_max_workers", 8))
+        except (TypeError, ValueError):
+            return 8
 
     @classmethod
     def get_system_time_zone(cls):
