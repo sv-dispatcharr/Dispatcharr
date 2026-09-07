@@ -2,6 +2,7 @@ import useSettingsStore from '../../../store/settings.jsx';
 import React, { useEffect, useState } from 'react';
 import { useForm } from '@mantine/form';
 import { updateSetting } from '../../../utils/pages/SettingsUtils.js';
+import useSettingsSaveGuard from '../../../hooks/useSettingsSaveGuard.jsx';
 import {
   Alert,
   Button,
@@ -140,6 +141,7 @@ const ProxySettingsForm = React.memo(({ active }) => {
   const settings = useSettingsStore((s) => s.settings);
 
   const [saved, setSaved] = useState(false);
+  const { isSavingRef, runSave } = useSettingsSaveGuard();
 
   const proxySettingsForm = useForm({
     mode: 'controlled',
@@ -151,7 +153,7 @@ const ProxySettingsForm = React.memo(({ active }) => {
   }, [active]);
 
   useEffect(() => {
-    if (settings) {
+    if (settings && !isSavingRef.current) {
       if (settings['proxy_settings']?.value) {
         // Merge defaults so any newly-added keys not yet in the stored
         // settings object still show their default value rather than blank.
@@ -171,14 +173,22 @@ const ProxySettingsForm = React.memo(({ active }) => {
     setSaved(false);
 
     try {
-      const result = await updateSetting({
-        ...settings['proxy_settings'],
-        value: proxySettingsForm.getValues(), // Send as object
+      await runSave(async () => {
+        const result = await updateSetting({
+          ...settings['proxy_settings'],
+          value: proxySettingsForm.getValues(), // Send as object
+        });
+        // API functions return undefined on error
+        if (result) {
+          if (result.value) {
+            proxySettingsForm.setValues({
+              ...getProxySettingDefaults(),
+              ...result.value,
+            });
+          }
+          setSaved(true);
+        }
       });
-      // API functions return undefined on error
-      if (result) {
-        setSaved(true);
-      }
     } catch (error) {
       // Error notifications are already shown by API functions
       console.error('Error saving proxy settings:', error);

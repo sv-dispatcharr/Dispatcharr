@@ -15,9 +15,9 @@ vi.mock('../../../../constants.js', () => ({
 
 // ── Utility mocks ──────────────────────────────────────────────────────────────
 vi.mock('../../../../utils/pages/SettingsUtils.js', () => ({
-  getChangedSettings: vi.fn(),
-  parseSettings: vi.fn(),
-  saveChangedSettings: vi.fn(),
+  getChangedGroupSettings: vi.fn(),
+  parseGroupSettings: vi.fn(),
+  saveGroupSettings: vi.fn(),
 }));
 
 vi.mock('../../../../utils/forms/settings/SystemSettingsFormUtils.js', () => ({
@@ -95,9 +95,9 @@ vi.mock('@mantine/core', () => ({
 // ──────────────────────────────────────────────────────────────────────────────
 import useSettingsStore from '../../../../store/settings.jsx';
 import {
-  getChangedSettings,
-  parseSettings,
-  saveChangedSettings,
+  getChangedGroupSettings,
+  parseGroupSettings,
+  saveGroupSettings,
 } from '../../../../utils/pages/SettingsUtils.js';
 import { getSystemSettingsFormInitialValues } from '../../../../utils/forms/settings/SystemSettingsFormUtils.js';
 import { useForm } from '@mantine/form';
@@ -152,11 +152,12 @@ const setupMocks = ({
   vi.mocked(useSettingsStore).mockImplementation((sel) =>
     sel({ settings, environment })
   );
-  vi.mocked(parseSettings).mockReturnValue(formValues);
-  vi.mocked(getChangedSettings).mockReturnValue({
+  vi.mocked(useSettingsStore).getState = vi.fn(() => ({ settings }));
+  vi.mocked(parseGroupSettings).mockReturnValue(formValues);
+  vi.mocked(getChangedGroupSettings).mockReturnValue({
     max_system_events: settings?.max_system_events ?? 100,
   });
-  vi.mocked(saveChangedSettings).mockResolvedValue(undefined);
+  vi.mocked(saveGroupSettings).mockResolvedValue(undefined);
 
   return { formMock };
 };
@@ -315,9 +316,9 @@ describe('SystemSettingsForm', () => {
           environment: makeEnvironment(),
         })
       );
-      vi.mocked(parseSettings).mockReturnValue(formValues);
-      vi.mocked(getChangedSettings).mockReturnValue({});
-      vi.mocked(saveChangedSettings).mockResolvedValue(undefined);
+      vi.mocked(parseGroupSettings).mockReturnValue(formValues);
+      vi.mocked(getChangedGroupSettings).mockReturnValue({});
+      vi.mocked(saveGroupSettings).mockResolvedValue(undefined);
 
       render(<SystemSettingsForm active={true} />);
       expect(screen.getByTestId('number-input')).toHaveValue(100);
@@ -327,11 +328,11 @@ describe('SystemSettingsForm', () => {
   // ── Settings initialization ────────────────────────────────────────────────
 
   describe('settings initialization', () => {
-    it('calls parseSettings with settings on mount', () => {
+    it('calls parseGroupSettings with settings on mount', () => {
       const settings = makeSettings();
       setupMocks({ settings });
       render(<SystemSettingsForm active={true} />);
-      expect(parseSettings).toHaveBeenCalledWith(settings);
+      expect(parseGroupSettings).toHaveBeenCalledWith(settings, 'system_settings');
     });
 
     it('calls form.setValues with parsed settings on mount', () => {
@@ -350,7 +351,7 @@ describe('SystemSettingsForm', () => {
       });
     });
 
-    it('does not call parseSettings when settings is null', () => {
+    it('does not call parseGroupSettings when settings is null', () => {
       const nullFormValues = { max_system_events: 100 };
       const formMock = {
         values: nullFormValues,
@@ -376,11 +377,11 @@ describe('SystemSettingsForm', () => {
       vi.mocked(useSettingsStore).mockImplementation((sel) =>
         sel({ settings: null, environment: makeEnvironment() })
       );
-      vi.mocked(parseSettings).mockReturnValue({});
-      vi.mocked(saveChangedSettings).mockResolvedValue(undefined);
+      vi.mocked(parseGroupSettings).mockReturnValue({});
+      vi.mocked(saveGroupSettings).mockResolvedValue(undefined);
 
       render(<SystemSettingsForm active={true} />);
-      expect(parseSettings).not.toHaveBeenCalled();
+      expect(parseGroupSettings).not.toHaveBeenCalled();
     });
   });
 
@@ -403,7 +404,7 @@ describe('SystemSettingsForm', () => {
   // ── Save / submit ──────────────────────────────────────────────────────────
 
   describe('save button', () => {
-    it('calls getChangedSettings and saveChangedSettings on submit', async () => {
+    it('calls getChangedGroupSettings and saveGroupSettings on submit', async () => {
       const settings = makeSettings();
       const { formMock } = setupMocks({ settings });
       render(<SystemSettingsForm active={true} />);
@@ -411,11 +412,12 @@ describe('SystemSettingsForm', () => {
       fireEvent.click(screen.getByText('Save'));
 
       await waitFor(() => {
-        expect(getChangedSettings).toHaveBeenCalledWith(
+        expect(getChangedGroupSettings).toHaveBeenCalledWith(
           formMock.getValues(),
-          settings
+          settings,
+          'system_settings'
         );
-        expect(saveChangedSettings).toHaveBeenCalled();
+        expect(saveGroupSettings).toHaveBeenCalled();
       });
     });
 
@@ -426,9 +428,10 @@ describe('SystemSettingsForm', () => {
       fireEvent.click(screen.getByText('Save'));
 
       await waitFor(() => {
-        expect(getChangedSettings).toHaveBeenCalledWith(
+        expect(getChangedGroupSettings).toHaveBeenCalledWith(
           expect.objectContaining({ log_max_mb: 10, log_keep: 5 }),
-          expect.anything()
+          expect.anything(),
+          'system_settings'
         );
       });
     });
@@ -445,12 +448,12 @@ describe('SystemSettingsForm', () => {
       expect(screen.getByText('Saved Successfully')).toBeInTheDocument();
     });
 
-    it('does not show success alert when saveChangedSettings throws', async () => {
+    it('does not show success alert when saveGroupSettings throws', async () => {
       const consoleSpy = vi
         .spyOn(console, 'error')
         .mockImplementation(() => {});
       setupMocks();
-      vi.mocked(saveChangedSettings).mockRejectedValue(
+      vi.mocked(saveGroupSettings).mockRejectedValue(
         new Error('save failed')
       );
 
@@ -464,13 +467,13 @@ describe('SystemSettingsForm', () => {
       consoleSpy.mockRestore();
     });
 
-    it('logs error when saveChangedSettings throws', async () => {
+    it('logs error when saveGroupSettings throws', async () => {
       const error = new Error('save failed');
       const consoleSpy = vi
         .spyOn(console, 'error')
         .mockImplementation(() => {});
       setupMocks();
-      vi.mocked(saveChangedSettings).mockRejectedValue(error);
+      vi.mocked(saveGroupSettings).mockRejectedValue(error);
 
       render(<SystemSettingsForm active={true} />);
       fireEvent.click(screen.getByText('Save'));

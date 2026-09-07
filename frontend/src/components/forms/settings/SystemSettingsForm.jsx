@@ -1,10 +1,11 @@
 import useSettingsStore from '../../../store/settings.jsx';
 import React, { useEffect, useState } from 'react';
 import {
-  getChangedSettings,
-  parseSettings,
-  saveChangedSettings,
+  getChangedGroupSettings,
+  parseGroupSettings,
+  saveGroupSettings,
 } from '../../../utils/pages/SettingsUtils.js';
+import useSettingsSaveGuard from '../../../hooks/useSettingsSaveGuard.jsx';
 import {
   Alert,
   Button,
@@ -20,6 +21,8 @@ import { useForm } from '@mantine/form';
 import { getSystemSettingsFormInitialValues } from '../../../utils/forms/settings/SystemSettingsFormUtils.js';
 import { REGION_CHOICES } from '../../../constants.js';
 
+const SYSTEM_GROUP = 'system_settings';
+
 const SystemSettingsForm = React.memo(({ active }) => {
   const settings = useSettingsStore((s) => s.settings);
   const isModular =
@@ -32,6 +35,7 @@ const SystemSettingsForm = React.memo(({ active }) => {
   );
 
   const [saved, setSaved] = useState(false);
+  const { isSavingRef, runSave } = useSettingsSaveGuard();
 
   const form = useForm({
     mode: 'controlled',
@@ -43,23 +47,29 @@ const SystemSettingsForm = React.memo(({ active }) => {
   }, [active]);
 
   useEffect(() => {
-    if (settings) {
-      const formValues = parseSettings(settings);
-
-      form.setValues(formValues);
+    if (settings && !isSavingRef.current) {
+      form.setValues(parseGroupSettings(settings, SYSTEM_GROUP));
     }
   }, [settings]);
 
   const onSubmit = async () => {
     setSaved(false);
 
-    const changedSettings = getChangedSettings(form.getValues(), settings);
+    const changedSettings = getChangedGroupSettings(
+      form.getValues(),
+      settings,
+      SYSTEM_GROUP
+    );
 
-    // Update each changed setting in the backend (create if missing)
     try {
-      await saveChangedSettings(settings, changedSettings);
-
-      setSaved(true);
+      await runSave(async () => {
+        await saveGroupSettings(settings, SYSTEM_GROUP, changedSettings);
+        const latestSettings = useSettingsStore.getState().settings;
+        if (latestSettings) {
+          form.setValues(parseGroupSettings(latestSettings, SYSTEM_GROUP));
+        }
+        setSaved(true);
+      });
     } catch (error) {
       // Error notifications are already shown by API functions
       // Just don't show the success message

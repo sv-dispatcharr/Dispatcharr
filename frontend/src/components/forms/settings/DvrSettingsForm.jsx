@@ -1,12 +1,13 @@
 import useSettingsStore from '../../../store/settings.jsx';
 import useOutputProfilesStore from '../../../store/outputProfiles.jsx';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  getChangedSettings,
-  parseSettings,
-  saveChangedSettings,
+  getChangedGroupSettings,
+  parseGroupSettings,
+  saveGroupSettings,
 } from '../../../utils/pages/SettingsUtils.js';
 import { showNotification } from '../../../utils/notificationUtils.js';
+import useSettingsSaveGuard from '../../../hooks/useSettingsSaveGuard.jsx';
 import {
   Alert,
   Button,
@@ -27,6 +28,8 @@ import {
 } from '../../../utils/forms/settings/DvrSettingsFormUtils.js';
 import { useForm } from '@mantine/form';
 
+const DVR_GROUP = 'dvr_settings';
+
 const DvrSettingsForm = React.memo(({ active }) => {
   const settings = useSettingsStore((s) => s.settings);
   const outputProfiles = useOutputProfilesStore((s) => s.profiles);
@@ -37,7 +40,7 @@ const DvrSettingsForm = React.memo(({ active }) => {
     path: '',
     exists: false,
   });
-  const isSavingRef = useRef(false);
+  const { isSavingRef, runSave } = useSettingsSaveGuard();
 
   const form = useForm({
     mode: 'controlled',
@@ -50,7 +53,7 @@ const DvrSettingsForm = React.memo(({ active }) => {
 
   useEffect(() => {
     if (settings && !isSavingRef.current) {
-      const formValues = parseSettings(settings);
+      const formValues = parseGroupSettings(settings, DVR_GROUP);
 
       form.setValues(formValues);
 
@@ -98,14 +101,10 @@ const DvrSettingsForm = React.memo(({ active }) => {
           autoClose: 3000,
           color: 'green',
         });
+        // Backend already persisted the path. Only update local form state here.
+        // Writing the Zustand settings store would re-run the hydrate effect and
+        // wipe any unsaved edits on other DVR fields.
         form.setFieldValue('comskip_custom_path', response.path);
-        useSettingsStore.getState().updateSetting({
-          ...(settings['comskip_custom_path'] || {
-            key: 'comskip_custom_path',
-            name: 'DVR Comskip Custom Path',
-          }),
-          value: response.path,
-        });
         setComskipConfig({ path: response.path, exists: true });
       }
     } catch (error) {
@@ -118,27 +117,30 @@ const DvrSettingsForm = React.memo(({ active }) => {
 
   const onSubmit = async () => {
     setSaved(false);
-    isSavingRef.current = true;
 
-    const changedSettings = getChangedSettings(form.getValues(), settings);
+    const changedSettings = getChangedGroupSettings(
+      form.getValues(),
+      settings,
+      DVR_GROUP
+    );
 
     try {
-      await saveChangedSettings(settings, changedSettings);
-      isSavingRef.current = false;
-      const latestSettings = useSettingsStore.getState().settings;
-      if (latestSettings) {
-        const formValues = parseSettings(latestSettings);
-        form.setValues(formValues);
-        if (formValues['comskip_custom_path']) {
-          setComskipConfig((prev) => ({
-            path: formValues['comskip_custom_path'],
-            exists: prev.exists,
-          }));
+      await runSave(async () => {
+        await saveGroupSettings(settings, DVR_GROUP, changedSettings);
+        const latestSettings = useSettingsStore.getState().settings;
+        if (latestSettings) {
+          const formValues = parseGroupSettings(latestSettings, DVR_GROUP);
+          form.setValues(formValues);
+          if (formValues['comskip_custom_path']) {
+            setComskipConfig((prev) => ({
+              path: formValues['comskip_custom_path'],
+              exists: prev.exists,
+            }));
+          }
         }
-      }
-      setSaved(true);
+        setSaved(true);
+      });
     } catch (error) {
-      isSavingRef.current = false;
       console.error('Error saving settings:', error);
     }
   };

@@ -12,9 +12,9 @@ vi.mock('../../../../store/outputProfiles.jsx', () => ({ default: vi.fn() }));
 
 // ── Utility mocks ──────────────────────────────────────────────────────────────
 vi.mock('../../../../utils/pages/SettingsUtils.js', () => ({
-  getChangedSettings: vi.fn(),
-  parseSettings: vi.fn(),
-  saveChangedSettings: vi.fn(),
+  getChangedGroupSettings: vi.fn(),
+  parseGroupSettings: vi.fn(),
+  saveGroupSettings: vi.fn(),
 }));
 
 vi.mock('../../../../utils/notificationUtils.js', () => ({
@@ -121,9 +121,9 @@ import useSettingsStore from '../../../../store/settings.jsx';
 import useOutputProfilesStore from '../../../../store/outputProfiles.jsx';
 import { useForm } from '@mantine/form';
 import {
-  getChangedSettings,
-  parseSettings,
-  saveChangedSettings,
+  getChangedGroupSettings,
+  parseGroupSettings,
+  saveGroupSettings,
 } from '../../../../utils/pages/SettingsUtils.js';
 import { showNotification } from '../../../../utils/notificationUtils.js';
 import {
@@ -193,13 +193,14 @@ const setupMocks = ({
 
   vi.mocked(useForm).mockReturnValue(formMock);
   vi.mocked(getDvrSettingsFormInitialValues).mockReturnValue(mockFormValues);
-  vi.mocked(parseSettings).mockReturnValue(mockFormValues);
+  vi.mocked(parseGroupSettings).mockReturnValue(mockFormValues);
   vi.mocked(getComskipConfig).mockResolvedValue({ path: '', exists: false });
-  vi.mocked(getChangedSettings).mockReturnValue({});
-  vi.mocked(saveChangedSettings).mockResolvedValue(undefined);
+  vi.mocked(getChangedGroupSettings).mockReturnValue({});
+  vi.mocked(saveGroupSettings).mockResolvedValue(undefined);
 
   vi.mocked(useSettingsStore).mockImplementation((sel) => sel({ settings }));
   vi.mocked(useSettingsStore).getState = vi.fn(() => ({
+    settings,
     updateSetting: vi.fn(),
   }));
 
@@ -409,10 +410,10 @@ describe('DvrSettingsForm', () => {
       });
     });
 
-    it('calls parseSettings with settings on mount', async () => {
+    it('calls parseGroupSettings with settings on mount', async () => {
       render(<DvrSettingsForm active={true} />);
       await waitFor(() => {
-        expect(parseSettings).toHaveBeenCalledWith(makeSettings());
+        expect(parseGroupSettings).toHaveBeenCalledWith(makeSettings(), 'dvr_settings');
         expect(formMock.setValues).toHaveBeenCalledWith(mockFormValues);
       });
     });
@@ -468,7 +469,7 @@ describe('DvrSettingsForm', () => {
   // ── active prop ────────────────────────────────────────────────────────────
   describe('active prop', () => {
     it('resets saved state when active becomes false', async () => {
-      vi.mocked(getChangedSettings).mockReturnValue({ comskip_enabled: true });
+      vi.mocked(getChangedGroupSettings).mockReturnValue({ comskip_enabled: true });
       const { rerender } = render(<DvrSettingsForm active={true} />);
 
       fireEvent.submit(screen.getByText('Save').closest('form'));
@@ -487,19 +488,24 @@ describe('DvrSettingsForm', () => {
 
   // ── Form submission ────────────────────────────────────────────────────────
   describe('form submission', () => {
-    it('calls getChangedSettings and saveChangedSettings on submit', async () => {
-      vi.mocked(getChangedSettings).mockReturnValue({ pre_offset_minutes: 5 });
+    it('calls getChangedGroupSettings and saveGroupSettings on submit', async () => {
+      vi.mocked(getChangedGroupSettings).mockReturnValue({ pre_offset_minutes: 5 });
       render(<DvrSettingsForm active={true} />);
       fireEvent.submit(screen.getByText('Save').closest('form'));
 
       await waitFor(() => {
-        expect(getChangedSettings).toHaveBeenCalledWith(
+        expect(getChangedGroupSettings).toHaveBeenCalledWith(
           mockFormValues,
-          makeSettings()
+          makeSettings(),
+          'dvr_settings'
         );
-        expect(saveChangedSettings).toHaveBeenCalledWith(makeSettings(), {
-          pre_offset_minutes: 5,
-        });
+        expect(saveGroupSettings).toHaveBeenCalledWith(
+          makeSettings(),
+          'dvr_settings',
+          {
+            pre_offset_minutes: 5,
+          }
+        );
       });
     });
 
@@ -513,8 +519,8 @@ describe('DvrSettingsForm', () => {
       });
     });
 
-    it('does not show success alert when saveChangedSettings throws', async () => {
-      vi.mocked(saveChangedSettings).mockRejectedValue(
+    it('does not show success alert when saveGroupSettings throws', async () => {
+      vi.mocked(saveGroupSettings).mockRejectedValue(
         new Error('save failed')
       );
       const consoleSpy = vi
