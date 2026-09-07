@@ -10,7 +10,7 @@ from unittest.mock import patch
 from django.test import TestCase
 
 from apps.channels.tasks import _dvr_capture_url
-from core.models import CoreSettings
+from core.models import DVR_SETTINGS_KEY, CoreSettings
 
 BASE = "http://127.0.0.1:5656"
 UUID = "0f9d1b6e-0000-0000-0000-00000000abcd"
@@ -38,14 +38,15 @@ class DvrOutputProfileSettingTests(TestCase):
 
     def setUp(self):
         # Settings groups are cached in Redis, and that cache is NOT rolled back
-        # with the test transaction — a value stored by one test would otherwise
-        # still be readable in the next. Deleting the row fires the post_delete
-        # invalidation, so each test starts from the real defaults.
-        CoreSettings.objects.filter(key="dvr_settings").delete()
+        # with the test transaction. A prior test may have written a value that
+        # Redis still holds after the DB row is gone, so deleting alone does not
+        # always fire post_delete. Invalidate explicitly, then drop any row.
+        CoreSettings.invalidate_group_cache(DVR_SETTINGS_KEY)
+        CoreSettings.objects.filter(key=DVR_SETTINGS_KEY).delete()
 
     def _store(self, value):
         CoreSettings._update_group(
-            "dvr_settings", "DVR Settings", {"dvr_output_profile_id": value}
+            DVR_SETTINGS_KEY, "DVR Settings", {"output_profile_id": value}
         )
 
     def test_unset_is_none(self):

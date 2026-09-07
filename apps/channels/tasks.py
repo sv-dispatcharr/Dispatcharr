@@ -1700,12 +1700,10 @@ def get_dvr_stream_base_url():
 
 
 def _dvr_capture_url(base, channel_uuid, output_profile_id=None):
-    """Build the TS proxy URL a recording captures from.
+    """Build the TS proxy URL used for DVR capture.
 
-    The capture runs `-c copy`, so the proxy's output profile is the only place
-    a recording can be transcoded, and the request is anonymous — no user
-    profile applies. With no id the URL is unchanged and the source is recorded
-    as-is.
+    When ``output_profile_id`` is set, appends ``?output_profile=<id>`` so the
+    proxy applies that profile. When unset, returns the plain stream URL.
     """
     url = f"{base}/proxy/ts/stream/{channel_uuid}"
     if output_profile_id:

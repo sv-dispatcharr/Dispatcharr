@@ -215,21 +215,21 @@ const DvrSettingsForm = React.memo(({ active }) => {
             : 'No custom comskip.ini uploaded.'}
         </Text>
         <Select
-          id="dvr_output_profile_id"
-          name="dvr_output_profile_id"
+          id="output_profile_id"
+          name="output_profile_id"
           label="DVR Output Profile"
           description="Output profile applied when capturing a recording. Leave unset to record the source as-is."
           clearable
           searchable
-          placeholder="No transcoding (record as-is)"
+          placeholder="No transcoding (pass-through)"
           value={
-            form.values['dvr_output_profile_id'] != null
-              ? `${form.values['dvr_output_profile_id']}`
+            form.values['output_profile_id'] != null
+              ? `${form.values['output_profile_id']}`
               : null
           }
           onChange={(value) =>
             form.setFieldValue(
-              'dvr_output_profile_id',
+              'output_profile_id',
               value ? parseInt(value, 10) : null
             )
           }

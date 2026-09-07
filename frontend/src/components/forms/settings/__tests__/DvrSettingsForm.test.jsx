@@ -146,7 +146,7 @@ const mockFormValues = {
   tv_fallback_template: '',
   movie_template: '',
   movie_fallback_template: '',
-  dvr_output_profile_id: null,
+  output_profile_id: null,
 };
 
 const mockOutputProfiles = [
@@ -297,11 +297,11 @@ describe('DvrSettingsForm', () => {
     it('offers only active output profiles for DVR capture', async () => {
       render(<DvrSettingsForm active={true} />);
       await waitFor(() => {
-        expect(screen.getByTestId('dvr_output_profile_id')).toBeInTheDocument();
+        expect(screen.getByTestId('output_profile_id')).toBeInTheDocument();
       });
 
       const values = Array.from(
-        screen.getByTestId('dvr_output_profile_id').options
+        screen.getByTestId('output_profile_id').options
       ).map((o) => o.value);
       expect(values).toEqual(['1', '6']);
     });
@@ -309,14 +309,14 @@ describe('DvrSettingsForm', () => {
     it('stores the chosen output profile as an integer', async () => {
       render(<DvrSettingsForm active={true} />);
       await waitFor(() => {
-        expect(screen.getByTestId('dvr_output_profile_id')).toBeInTheDocument();
+        expect(screen.getByTestId('output_profile_id')).toBeInTheDocument();
       });
 
-      fireEvent.change(screen.getByTestId('dvr_output_profile_id'), {
+      fireEvent.change(screen.getByTestId('output_profile_id'), {
         target: { value: '6' },
       });
       expect(formMock.setFieldValue).toHaveBeenCalledWith(
-        'dvr_output_profile_id',
+        'output_profile_id',
         6
       );
     });
