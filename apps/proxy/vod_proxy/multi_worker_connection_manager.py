@@ -19,6 +19,23 @@ from apps.m3u.models import M3UAccountProfile
 
 logger = logging.getLogger("vod_proxy")
 
+# Mid-stream upstream failures that warrant a transparent Range reopen.
+_UPSTREAM_RETRY_EXCEPTIONS = (
+    requests.exceptions.ReadTimeout,
+    requests.exceptions.ConnectTimeout,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.ChunkedEncodingError,
+)
+try:
+    from urllib3.exceptions import ProtocolError as _Urllib3ProtocolError
+
+    _UPSTREAM_RETRY_EXCEPTIONS = _UPSTREAM_RETRY_EXCEPTIONS + (_Urllib3ProtocolError,)
+except ImportError:
+    pass
+
+# Consecutive failed reopens before giving up. Successful chunks reset the count.
+_MAX_CONSECUTIVE_UPSTREAM_RETRIES = 3
+
 # Atomic active_streams mutations. These run as Redis Lua so INCR/DECR never
 # contend with the session metadata lock used for ownership, seek info, and
 # get_stream header updates. One EVALSHA round-trip each.
@@ -877,6 +894,27 @@ class MultiWorkerVODConnectionManager:
         """Get Redis key for tracking connections per profile - STANDARDIZED with TS proxy"""
         return f"profile_connections:{profile_id}"
 
+    @staticmethod
+    def _range_start_byte(range_header: str = None) -> int:
+        """Absolute start offset from a Range header, or 0."""
+        if not range_header or "bytes=" not in range_header:
+            return 0
+        try:
+            start_str = range_header.replace("bytes=", "").split("-", 1)[0]
+            return int(start_str) if start_str else 0
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _resume_range_header(range_header: str, absolute_offset: int) -> str:
+        """Build a Range header continuing at absolute_offset, keeping any end bound."""
+        end = ""
+        if range_header and range_header.startswith("bytes=") and "-" in range_header:
+            end = range_header.replace("bytes=", "").split("-", 1)[1]
+        if end:
+            return f"bytes={absolute_offset}-{end}"
+        return f"bytes={absolute_offset}-"
+
     def _check_and_reserve_profile_slot(self, m3u_profile) -> bool:
         """
         Atomically check and reserve a connection slot for the given profile.
@@ -1391,38 +1429,83 @@ class MultiWorkerVODConnectionManager:
 
                     bytes_sent = 0
                     chunk_count = 0
+                    consecutive_upstream_failures = 0
+                    range_start = self._range_start_byte(range_header)
+                    current_upstream = upstream_response
+                    resume_range = range_header
 
                     # Get the stop signal key for this client
                     stop_key = get_vod_client_stop_key(client_id)
 
-                    for chunk in upstream_response.iter_content(chunk_size=8192):
-                        if chunk:
-                            yield chunk
-                            bytes_sent += len(chunk)
-                            chunk_count += 1
+                    while True:
+                        try:
+                            if current_upstream is None:
+                                current_upstream = redis_connection.get_stream(
+                                    resume_range
+                                )
+                                if current_upstream is None:
+                                    raise ConnectionError(
+                                        f"Upstream reopen returned no stream "
+                                        f"for {resume_range}"
+                                    )
 
-                            # Check for stop signal every 100 chunks
-                            if chunk_count % 100 == 0:
-                                # Check if stop signal has been set
-                                if self.redis_client and self.redis_client.exists(stop_key):
-                                    logger.info(f"[{client_id}] Worker {self.worker_id} - Stop signal detected, terminating stream")
-                                    # Delete the stop key
-                                    self.redis_client.delete(stop_key)
-                                    stop_signal_detected = True
-                                    break
+                            for chunk in current_upstream.iter_content(chunk_size=8192):
+                                if chunk:
+                                    yield chunk
+                                    bytes_sent += len(chunk)
+                                    chunk_count += 1
+                                    # Data flowing again: clear the consecutive failure streak.
+                                    consecutive_upstream_failures = 0
 
-                                # Update the connection state
-                                logger.debug(f"Client: [{client_id}] Worker: {self.worker_id} sent {chunk_count} chunks for VOD: {content_name}")
-                                if redis_connection._acquire_lock():
-                                    try:
-                                        state = redis_connection._get_connection_state()
-                                        if state:
-                                            state.last_activity = time.time()
-                                            # Store cumulative bytes sent in connection state
-                                            state.bytes_sent = bytes_sent  # Use cumulative bytes_sent, not chunk size
-                                            redis_connection._save_connection_state(state)
-                                    finally:
-                                        redis_connection._release_lock()
+                                    # Check for stop signal every 100 chunks
+                                    if chunk_count % 100 == 0:
+                                        if self.redis_client and self.redis_client.exists(stop_key):
+                                            logger.info(f"[{client_id}] Worker {self.worker_id} - Stop signal detected, terminating stream")
+                                            self.redis_client.delete(stop_key)
+                                            stop_signal_detected = True
+                                            break
+
+                                        logger.debug(f"Client: [{client_id}] Worker: {self.worker_id} sent {chunk_count} chunks for VOD: {content_name}")
+                                        if redis_connection._acquire_lock():
+                                            try:
+                                                state = redis_connection._get_connection_state()
+                                                if state:
+                                                    state.last_activity = time.time()
+                                                    state.bytes_sent = bytes_sent
+                                                    redis_connection._save_connection_state(state)
+                                            finally:
+                                                redis_connection._release_lock()
+
+                            # Natural EOF or stop signal: leave the retry loop.
+                            break
+
+                        except _UPSTREAM_RETRY_EXCEPTIONS as upstream_err:
+                            consecutive_upstream_failures += 1
+                            if consecutive_upstream_failures > _MAX_CONSECUTIVE_UPSTREAM_RETRIES:
+                                logger.error(
+                                    f"[{client_id}] Upstream failed {consecutive_upstream_failures} "
+                                    f"times in a row; closing stream for client reconnect: "
+                                    f"{upstream_err}"
+                                )
+                                redis_connection._close_local_http(
+                                    extra_response=current_upstream
+                                )
+                                return
+
+                            absolute_offset = range_start + bytes_sent
+                            resume_range = self._resume_range_header(
+                                range_header, absolute_offset
+                            )
+                            logger.warning(
+                                f"[{client_id}] Upstream interrupted ({upstream_err}); "
+                                f"reopening at {resume_range} "
+                                f"(attempt {consecutive_upstream_failures}/"
+                                f"{_MAX_CONSECUTIVE_UPSTREAM_RETRIES})"
+                            )
+                            redis_connection._close_local_http(
+                                extra_response=current_upstream
+                            )
+                            current_upstream = None
 
                     if stop_signal_detected:
                         logger.info(f"[{client_id}] Worker {self.worker_id} - Stream stopped by signal: {bytes_sent} bytes sent")
@@ -1517,7 +1600,6 @@ class MultiWorkerVODConnectionManager:
                         cleanup_thread = threading.Thread(target=delayed_cleanup)
                         cleanup_thread.daemon = True
                         cleanup_thread.start()
-                    yield b"Error: Stream interrupted"
 
                 finally:
                     # This request's provider HTTP is never shared with a reconnect.

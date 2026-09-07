@@ -1459,3 +1459,243 @@ class TestCreateRaceBindsStoredProfile(TestCase):
         self.assertEqual(
             int(redis._data.get(f"profile_connections:{profile_loser.id}", 0)), 0
         )
+
+
+class TestMidStreamUpstreamRetry(TestCase):
+    """Transparent Range reopen when upstream stalls mid-body."""
+
+    def _make_manager(self, redis):
+        MultiWorkerManagerImportMixin.get_manager_class()
+        from apps.proxy.vod_proxy.multi_worker_connection_manager import (
+            MultiWorkerVODConnectionManager,
+        )
+
+        mgr = MultiWorkerVODConnectionManager.__new__(MultiWorkerVODConnectionManager)
+        mgr.redis_client = redis
+        mgr.worker_id = "test-worker"
+        return mgr
+
+    def _run_stream(self, mgr, redis, profile, content, request, get_stream_side_effect,
+                    range_header="bytes=100-"):
+        """Drive the full stream while get_stream stays patched (incl. reopens)."""
+        from unittest.mock import patch
+
+        def fake_reserve(p):
+            redis.incr(f"profile_connections:{p.id}")
+            return True
+
+        with patch.object(mgr, "find_matching_idle_session", return_value=None), \
+             patch.object(mgr, "_check_and_reserve_profile_slot", side_effect=fake_reserve), \
+             patch.object(mgr, "_send_vod_event"), \
+             patch(
+                 "apps.proxy.vod_proxy.multi_worker_connection_manager.RedisBackedVODConnection.get_stream",
+                 side_effect=get_stream_side_effect,
+             ), \
+             patch(
+                 "apps.proxy.vod_proxy.multi_worker_connection_manager.RedisBackedVODConnection.get_headers",
+                 return_value={"content_type": "video/mp4", "content_length": "1000"},
+             ), \
+             patch(
+                 "apps.proxy.vod_proxy.multi_worker_connection_manager.Movie",
+                 new=type(content),
+             ):
+            response = mgr.stream_content_with_session(
+                session_id="vod_retry",
+                content_obj=content,
+                stream_url="http://example.com/m.mp4",
+                m3u_profile=profile,
+                client_ip="1.2.3.4",
+                client_user_agent="ua",
+                request=request,
+                range_header=range_header,
+            )
+            return b"".join(response.streaming_content)
+
+    def test_resume_range_header_helpers(self):
+        from apps.proxy.vod_proxy.multi_worker_connection_manager import (
+            MultiWorkerVODConnectionManager,
+        )
+
+        self.assertEqual(MultiWorkerVODConnectionManager._range_start_byte("bytes=100-"), 100)
+        self.assertEqual(MultiWorkerVODConnectionManager._range_start_byte("bytes=100-500"), 100)
+        self.assertEqual(MultiWorkerVODConnectionManager._range_start_byte(None), 0)
+        self.assertEqual(
+            MultiWorkerVODConnectionManager._resume_range_header("bytes=100-", 250),
+            "bytes=250-",
+        )
+        self.assertEqual(
+            MultiWorkerVODConnectionManager._resume_range_header("bytes=100-500", 250),
+            "bytes=250-500",
+        )
+
+    def test_read_timeout_reopens_and_continues(self):
+        """One mid-stream ReadTimeout reopens at absolute offset and finishes."""
+        import requests
+        from unittest.mock import MagicMock
+
+        from apps.m3u.models import M3UAccount
+        from apps.proxy.vod_proxy.tests.test_vod_lock_contention import LockAwareFakeRedis
+
+        account = M3UAccount.objects.create(name="Provider-retry")
+        profile = account.profiles.get(is_default=True)
+        redis = LockAwareFakeRedis()
+        redis.set(f"profile_connections:{profile.id}", 0)
+        mgr = self._make_manager(redis)
+
+        content = MagicMock()
+        content.uuid = "uuid-retry"
+        content.name = "Movie"
+        request = MagicMock()
+        request.META = {}
+
+        first = MagicMock()
+
+        def first_iter(chunk_size=8192):
+            yield b"aaa"
+            raise requests.exceptions.ReadTimeout("stalled")
+
+        first.iter_content.side_effect = first_iter
+
+        second = MagicMock()
+        second.iter_content.return_value = [b"bbb", b"ccc"]
+
+        ranges_requested = []
+
+        def get_stream(*args, **kwargs):
+            rh = kwargs.get("range_header")
+            if rh is None:
+                for a in reversed(args):
+                    if isinstance(a, (str, type(None))):
+                        rh = a
+                        break
+            ranges_requested.append(rh)
+            if len(ranges_requested) == 1:
+                return first
+            return second
+
+        body = self._run_stream(mgr, redis, profile, content, request, get_stream)
+
+        self.assertEqual(body, b"aaabbbccc")
+        self.assertEqual(ranges_requested[0], "bytes=100-")
+        # 100 start + 3 bytes already sent
+        self.assertEqual(ranges_requested[1], "bytes=103-")
+        self.assertEqual(int(redis._data.get(f"profile_connections:{profile.id}", 0)), 0)
+
+    def test_three_consecutive_failures_then_give_up(self):
+        """Four upstream failures in a row (initial + 3 retries) abort the stream."""
+        import requests
+        from unittest.mock import MagicMock
+
+        from apps.m3u.models import M3UAccount
+        from apps.proxy.vod_proxy.multi_worker_connection_manager import (
+            _MAX_CONSECUTIVE_UPSTREAM_RETRIES,
+        )
+        from apps.proxy.vod_proxy.tests.test_vod_lock_contention import LockAwareFakeRedis
+
+        account = M3UAccount.objects.create(name="Provider-retry-fail")
+        profile = account.profiles.get(is_default=True)
+        redis = LockAwareFakeRedis()
+        redis.set(f"profile_connections:{profile.id}", 0)
+        mgr = self._make_manager(redis)
+
+        content = MagicMock()
+        content.uuid = "uuid-retry-fail"
+        content.name = "Movie"
+        request = MagicMock()
+        request.META = {}
+
+        opens = []
+
+        def get_stream(*args, **kwargs):
+            rh = kwargs.get("range_header")
+            if rh is None:
+                for a in reversed(args):
+                    if isinstance(a, (str, type(None))):
+                        rh = a
+                        break
+            opens.append(rh)
+            upstream = MagicMock()
+
+            def boom(chunk_size=8192):
+                yield b"x"
+                raise requests.exceptions.ReadTimeout("still down")
+
+            if len(opens) == 1:
+                upstream.iter_content.side_effect = boom
+            else:
+                def fail_now(chunk_size=8192):
+                    raise requests.exceptions.ReadTimeout("still down")
+                    yield  # pragma: no cover
+
+                upstream.iter_content.side_effect = fail_now
+            return upstream
+
+        body = self._run_stream(mgr, redis, profile, content, request, get_stream)
+
+        self.assertEqual(body, b"x")
+        self.assertEqual(len(opens), 1 + _MAX_CONSECUTIVE_UPSTREAM_RETRIES)
+        self.assertEqual(int(redis._data.get(f"profile_connections:{profile.id}", 0)), 0)
+
+    def test_successful_chunk_resets_consecutive_retry_budget(self):
+        """After data flows again, a later stall gets a fresh 3-retry budget."""
+        import requests
+        from unittest.mock import MagicMock
+
+        from apps.m3u.models import M3UAccount
+        from apps.proxy.vod_proxy.multi_worker_connection_manager import (
+            _MAX_CONSECUTIVE_UPSTREAM_RETRIES,
+        )
+        from apps.proxy.vod_proxy.tests.test_vod_lock_contention import LockAwareFakeRedis
+
+        account = M3UAccount.objects.create(name="Provider-retry-reset")
+        profile = account.profiles.get(is_default=True)
+        redis = LockAwareFakeRedis()
+        redis.set(f"profile_connections:{profile.id}", 0)
+        mgr = self._make_manager(redis)
+
+        content = MagicMock()
+        content.uuid = "uuid-retry-reset"
+        content.name = "Movie"
+        request = MagicMock()
+        request.META = {}
+
+        opens = []
+
+        def get_stream(*args, **kwargs):
+            rh = kwargs.get("range_header")
+            if rh is None:
+                for a in reversed(args):
+                    if isinstance(a, (str, type(None))):
+                        rh = a
+                        break
+            opens.append(rh)
+            upstream = MagicMock()
+            n = len(opens)
+
+            if n == 1:
+                def phase1(chunk_size=8192):
+                    yield b"a"
+                    raise requests.exceptions.ReadTimeout("stall 1")
+
+                upstream.iter_content.side_effect = phase1
+            elif n == 2:
+                def phase2(chunk_size=8192):
+                    yield b"b"
+                    raise requests.exceptions.ReadTimeout("stall 2")
+
+                upstream.iter_content.side_effect = phase2
+            elif n < 2 + _MAX_CONSECUTIVE_UPSTREAM_RETRIES:
+                def fail_now(chunk_size=8192):
+                    raise requests.exceptions.ReadTimeout("stall streak")
+                    yield  # pragma: no cover
+
+                upstream.iter_content.side_effect = fail_now
+            else:
+                upstream.iter_content.return_value = [b"c"]
+            return upstream
+
+        body = self._run_stream(mgr, redis, profile, content, request, get_stream)
+
+        self.assertEqual(body, b"abc")
+        self.assertEqual(len(opens), 2 + _MAX_CONSECUTIVE_UPSTREAM_RETRIES)
+        self.assertEqual(int(redis._data.get(f"profile_connections:{profile.id}", 0)), 0)
