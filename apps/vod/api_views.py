@@ -38,10 +38,19 @@ from .image_proxy import (
     vodlogo_cache_url,
 )
 from .tasks import refresh_series_episodes, refresh_movie_advanced_data
+from .utils import is_vod_movies_enabled, is_vod_series_enabled, parse_category_filter_value
 from django.utils import timezone
 from datetime import timedelta
 
 logger = logging.getLogger(__name__)
+
+
+def _authenticated_user(request):
+    """Return the request user when authenticated, else None."""
+    user = getattr(request, "user", None)
+    if user is not None and getattr(user, "is_authenticated", False):
+        return user
+    return None
 
 
 class VODPagination(PageNumberPagination):
@@ -68,16 +77,14 @@ class MovieFilter(django_filters.FilterSet):
         if not value:
             return queryset
 
-        # Handle the format 'category_name|category_type'
-        if '|' in value:
-            category_name, category_type = value.rsplit('|', 1)
+        valid_types = {choice[0] for choice in VODCategory.CATEGORY_TYPE_CHOICES}
+        category_name, category_type = parse_category_filter_value(value, valid_types)
+        if category_type is not None:
             return queryset.filter(
                 m3u_relations__category__name=category_name,
-                m3u_relations__category__category_type=category_type
+                m3u_relations__category__category_type=category_type,
             )
-        else:
-            # Fallback: treat as category name only
-            return queryset.filter(m3u_relations__category__name=value)
+        return queryset.filter(m3u_relations__category__name=category_name)
 
 
 class MovieViewSet(viewsets.ReadOnlyModelViewSet):
@@ -101,14 +108,16 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
             return [Authenticated()]
 
     def get_queryset(self):
+        user = _authenticated_user(self.request)
+        if not is_vod_movies_enabled(user=user):
+            return Movie.objects.none()
+
         # Only return movies that have active M3U relations
         qs = Movie.objects.filter(
             m3u_relations__m3u_account__is_active=True
         ).distinct().select_related('logo').prefetch_related('m3u_relations__m3u_account')
-        user = getattr(self.request, 'user', None)
         if (
             user is not None
-            and getattr(user, 'is_authenticated', False)
             and user.user_level < 10
             and (user.custom_properties or {}).get('hide_adult_content', False)
         ):
@@ -290,16 +299,14 @@ class SeriesFilter(django_filters.FilterSet):
         if not value:
             return queryset
 
-        # Handle the format 'category_name|category_type'
-        if '|' in value:
-            category_name, category_type = value.rsplit('|', 1)
+        valid_types = {choice[0] for choice in VODCategory.CATEGORY_TYPE_CHOICES}
+        category_name, category_type = parse_category_filter_value(value, valid_types)
+        if category_type is not None:
             return queryset.filter(
                 m3u_relations__category__name=category_name,
-                m3u_relations__category__category_type=category_type
+                m3u_relations__category__category_type=category_type,
             )
-        else:
-            # Fallback: treat as category name only
-            return queryset.filter(m3u_relations__category__name=value)
+        return queryset.filter(m3u_relations__category__name=category_name)
 
 
 class EpisodeViewSet(viewsets.ReadOnlyModelViewSet):
@@ -323,6 +330,10 @@ class EpisodeViewSet(viewsets.ReadOnlyModelViewSet):
             return [Authenticated()]
 
     def get_queryset(self):
+        user = _authenticated_user(self.request)
+        if not is_vod_series_enabled(user=user):
+            return Episode.objects.none()
+
         return Episode.objects.select_related('series').filter(
             m3u_relations__m3u_account__is_active=True
         ).distinct()
@@ -354,6 +365,10 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
             return [Authenticated()]
 
     def get_queryset(self):
+        user = _authenticated_user(self.request)
+        if not is_vod_series_enabled(user=user):
+            return Series.objects.none()
+
         # Only return series that have active M3U relations.
         return Series.objects.filter(
             m3u_relations__m3u_account__is_active=True
@@ -644,6 +659,19 @@ class VODCategoryViewSet(viewsets.ReadOnlyModelViewSet):
         except KeyError:
             return [Authenticated()]
 
+    def get_queryset(self):
+        qs = VODCategory.objects.all()
+        user = _authenticated_user(self.request)
+        movies_allowed = is_vod_movies_enabled(user=user)
+        series_allowed = is_vod_series_enabled(user=user)
+        if movies_allowed and series_allowed:
+            return qs
+        if movies_allowed:
+            return qs.filter(category_type="movie")
+        if series_allowed:
+            return qs.filter(category_type="series")
+        return qs.none()
+
     def list(self, request, *args, **kwargs):
         """Override list to ensure Uncategorized categories and relations exist for all XC accounts with VOD enabled"""
         from apps.m3u.models import M3UAccount
@@ -724,6 +752,14 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
         logger.error("=== UnifiedContentViewSet.list() called ===")
 
         try:
+            user = _authenticated_user(request)
+            movies_allowed = is_vod_movies_enabled(user=user)
+            series_allowed = is_vod_series_enabled(user=user)
+            if not movies_allowed and not series_allowed:
+                return Response(
+                    {"count": 0, "next": False, "previous": False, "results": []}
+                )
+
             # Get pagination parameters
             page_size = int(request.query_params.get('page_size', 24))
             page_number = int(request.query_params.get('page', 1))
@@ -749,31 +785,46 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
             movie_params = []
             series_params = []
 
+            if not movies_allowed:
+                where_conditions[0] = "1=0"
+            if not series_allowed:
+                where_conditions[1] = "1=0"
+
             if search:
-                where_conditions[0] += " AND LOWER(movies.name) LIKE %s"
-                where_conditions[1] += " AND LOWER(series.name) LIKE %s"
                 search_param = f"%{search.lower()}%"
-                movie_params.append(search_param)
-                series_params.append(search_param)
+                if movies_allowed:
+                    where_conditions[0] += " AND LOWER(movies.name) LIKE %s"
+                    movie_params.append(search_param)
+                if series_allowed:
+                    where_conditions[1] += " AND LOWER(series.name) LIKE %s"
+                    series_params.append(search_param)
 
             if category:
-                if '|' in category:
-                    cat_name, cat_type = category.rsplit('|', 1)
-                    if cat_type == 'movie':
+                valid_types = {choice[0] for choice in VODCategory.CATEGORY_TYPE_CHOICES}
+                cat_name, cat_type = parse_category_filter_value(category, valid_types)
+                if cat_type == 'movie':
+                    if movies_allowed:
                         where_conditions[0] += " AND movies.id IN (SELECT movie_id FROM vod_m3umovierelation mmr JOIN vod_vodcategory c ON mmr.category_id = c.id WHERE c.name = %s)"
-                        where_conditions[1] = "1=0"  # Exclude series
                         movie_params.append(cat_name)
-                        series_params = []  # no params needed for "1=0"
-                    elif cat_type == 'series':
+                    else:
+                        where_conditions[0] = "1=0"
+                    where_conditions[1] = "1=0"  # Exclude series
+                    series_params = []  # no params needed for "1=0"
+                elif cat_type == 'series':
+                    if series_allowed:
                         where_conditions[1] += " AND series.id IN (SELECT series_id FROM vod_m3useriesrelation msr JOIN vod_vodcategory c ON msr.category_id = c.id WHERE c.name = %s)"
-                        where_conditions[0] = "1=0"  # Exclude movies
                         series_params.append(cat_name)
-                        movie_params = []  # no params needed for "1=0"
+                    else:
+                        where_conditions[1] = "1=0"
+                    where_conditions[0] = "1=0"  # Exclude movies
+                    movie_params = []  # no params needed for "1=0"
                 else:
-                    where_conditions[0] += " AND movies.id IN (SELECT movie_id FROM vod_m3umovierelation mmr JOIN vod_vodcategory c ON mmr.category_id = c.id WHERE c.name = %s)"
-                    where_conditions[1] += " AND series.id IN (SELECT series_id FROM vod_m3useriesrelation msr JOIN vod_vodcategory c ON msr.category_id = c.id WHERE c.name = %s)"
-                    movie_params.append(category)
-                    series_params.append(category)
+                    if movies_allowed:
+                        where_conditions[0] += " AND movies.id IN (SELECT movie_id FROM vod_m3umovierelation mmr JOIN vod_vodcategory c ON mmr.category_id = c.id WHERE c.name = %s)"
+                        movie_params.append(cat_name)
+                    if series_allowed:
+                        where_conditions[1] += " AND series.id IN (SELECT series_id FROM vod_m3useriesrelation msr JOIN vod_vodcategory c ON msr.category_id = c.id WHERE c.name = %s)"
+                        series_params.append(cat_name)
 
             params = movie_params + series_params
 
