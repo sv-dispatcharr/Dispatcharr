@@ -45,7 +45,15 @@ class DvrBroadcastDateTemplateTests(TestCase):
             end_time=end,
             custom_properties=custom_properties,
         )
-        return {"id": program.id, "title": program.title, "sub_title": ""}
+        # Mirror the booking snapshot: programme times are unadjusted; the
+        # Recording start/end passed to _build may include DVR pre/post offset.
+        return {
+            "id": program.id,
+            "title": program.title,
+            "sub_title": "",
+            "start_time": start.isoformat(),
+            "end_time": end.isoformat(),
+        }
 
     def _build(self, program, start, end, *, time_zone="UTC", tv_template=None,
                tv_fallback=None, movie_template=None, movie_fallback=None):
@@ -176,6 +184,45 @@ class DvrBroadcastDateTemplateTests(TestCase):
         )
         self.assertTrue(final_path.endswith(
             "TV/Example Show/20260115_203000-20260115_213000.mkv"
+        ), final_path)
+
+    def test_start_date_uses_programme_air_time_not_capture_window(self):
+        """Pre-offset on Recording.start_time must not pull the date back a day.
+
+        06:03 UTC is 00:03 in America/Chicago on the 16th. Five minutes of
+        pre-roll puts capture start on the 15th locally; the broadcast date
+        must stay the 16th. {start} still follows the capture window.
+        """
+        program_start = dt.datetime(2026, 1, 16, 6, 3, 0, tzinfo=dt.timezone.utc)
+        program_end = program_start + dt.timedelta(hours=1)
+        capture_start = program_start - dt.timedelta(minutes=5)
+        capture_end = program_end + dt.timedelta(minutes=5)
+        program = self._episode(program_start, program_end)
+        final_path = self._build(
+            program, capture_start, capture_end,
+            time_zone="America/Chicago",
+            tv_template="TV/{show}/{show} - {start_date} - {start}.mkv",
+        )
+        self.assertTrue(final_path.endswith(
+            "TV/Example Show/Example Show - 2026-01-16 - 20260116_055800.mkv"
+        ), final_path)
+
+    def test_start_date_falls_back_to_recording_start_without_programme_time(self):
+        """Manual bookings with no programme start_time still get a date."""
+        end = EVENING_UTC + dt.timedelta(hours=1)
+        program = {
+            "title": "Example Show",
+            "sub_title": "",
+            "season": 1,
+            "episode": 2,
+        }
+        final_path = self._build(
+            program, EVENING_UTC, end,
+            time_zone="Asia/Singapore",
+            tv_template="TV/{show}/{show} - {start_date}.mkv",
+        )
+        self.assertTrue(final_path.endswith(
+            "TV/Example Show/Example Show - 2026-01-16.mkv"
         ), final_path)
 
     def test_unusable_time_zone_falls_back_without_failing(self):

@@ -1325,6 +1325,34 @@ def _parse_epg_tv_movie_info(program):
 
 
 
+def _programme_broadcast_start(program, start_time):
+    """Guide air time for broadcast-date placeholders, not the capture window.
+
+    ``Recording.start_time`` includes DVR pre-offset. The booking snapshot's
+    ``program.start_time`` is the unadjusted programme start, so prefer that
+    when present. Fall back to the recording start for manual or recurring
+    bookings without a programme snapshot.
+    """
+    from django.utils import timezone
+    from django.utils.dateparse import parse_datetime
+
+    candidate = start_time
+    if isinstance(program, dict):
+        raw = program.get('start_time')
+        if raw not in (None, ''):
+            parsed = parse_datetime(str(raw))
+            if parsed is None:
+                try:
+                    parsed = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+                except ValueError:
+                    parsed = None
+            if parsed is not None:
+                candidate = parsed
+    if timezone.is_naive(candidate):
+        candidate = timezone.make_aware(candidate, timezone.utc)
+    return candidate
+
+
 def _build_output_paths(channel, program, start_time, end_time, recording_id):
     """
     Build (final_path, hls_dir, final_filename) using DVR templates.
@@ -1371,8 +1399,10 @@ def _build_output_paths(channel, program, start_time, end_time, recording_id):
 
     # Broadcast date in the system time zone, the zone sync_recurring_rule_impl
     # already uses for local_today, so a filename cannot name a different day
-    # than the rule matched. Ints, like season, so {start_month:02d} works.
-    local_start = start_time.astimezone(_system_timezone())
+    # than the rule matched.
+    local_start = _programme_broadcast_start(program, start_time).astimezone(
+        _system_timezone()
+    )
 
     values = {
         'show': show,
