@@ -201,12 +201,14 @@ USER_OUTPUT_PROFILE_PROP_KEY = "output_profile"
 
 
 def scrub_output_profile_id(profile_id):
-    """Remove a deleted OutputProfile id from user overrides and stream settings.
+    """Remove a deleted OutputProfile id from user overrides and settings.
 
     Clears ``User.custom_properties.output_profile`` when it matches the deleted
     id (so the user falls back to no per-user transcode). Clears
     ``hdhr_output_profile_id`` in stream settings when it matches (HDHR falls
-    back to pass-through). Only rows that reference the id are touched.
+    back to pass-through). Clears ``output_profile_id`` in DVR settings when
+    it matches (recordings fall back to recording the source as-is). Only rows
+    that reference the id are touched.
     """
     from django.db.models import Q
 
@@ -239,6 +241,14 @@ def scrub_output_profile_id(profile_id):
             STREAM_SETTINGS_KEY,
             "Stream Settings",
             {"hdhr_output_profile_id": None},
+        )
+
+    current_dvr = CoreSettings.get_dvr_output_profile_id()
+    if current_dvr is not None and current_dvr == profile_id_int:
+        CoreSettings._update_group(
+            DVR_SETTINGS_KEY,
+            "DVR Settings",
+            {"output_profile_id": None},
         )
 
 
@@ -671,6 +681,7 @@ class CoreSettings(models.Model):
             "pre_offset_minutes": 0,
             "post_offset_minutes": 0,
             "series_rules": [],
+            "output_profile_id": None,
         })
 
     @classmethod
@@ -796,6 +807,15 @@ class CoreSettings(models.Model):
     @classmethod
     def get_hdhr_output_profile_id(cls):
         raw = cls.get_stream_settings().get("hdhr_output_profile_id")
+        try:
+            return int(raw) if raw is not None else None
+        except (ValueError, TypeError):
+            return None
+
+    @classmethod
+    def get_dvr_output_profile_id(cls):
+        """Output profile applied to DVR captures, or None to record as-is."""
+        raw = cls.get_dvr_settings().get("output_profile_id")
         try:
             return int(raw) if raw is not None else None
         except (ValueError, TypeError):

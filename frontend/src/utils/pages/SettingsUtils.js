@@ -53,6 +53,7 @@ export const saveChangedSettings = async (settings, changedSettings) => {
     'pre_offset_minutes',
     'post_offset_minutes',
     'series_rules',
+    'output_profile_id',
   ];
   const backupFields = [
     'schedule_enabled',
@@ -117,6 +118,7 @@ export const saveChangedSettings = async (settings, changedSettings) => {
         'default_user_agent',
         'default_stream_profile',
         'hdhr_output_profile_id',
+        'output_profile_id',
       ].includes(formKey) &&
       value != null
     ) {
@@ -340,6 +342,11 @@ export const parseSettings = (settings) => {
     parsed.series_rules = Array.isArray(dvrSettings.series_rules)
       ? dvrSettings.series_rules
       : [];
+    // IDs must be strings for Select components
+    parsed.output_profile_id =
+      dvrSettings.output_profile_id != null
+        ? String(dvrSettings.output_profile_id)
+        : null;
   }
 
   // Backup settings - direct mapping with underscore keys
