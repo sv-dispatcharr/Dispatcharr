@@ -5,7 +5,7 @@ from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny
 from django_filters.rest_framework import DjangoFilterBackend
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 import django_filters
 import logging
 from types import SimpleNamespace
@@ -25,7 +25,6 @@ from .serializers import (
     VODLogoSerializer,
     M3UMovieRelationSerializer,
     M3USeriesRelationSerializer,
-    M3UEpisodeRelationSerializer,
     EpisodeWithProvidersSerializer,
     MovieProviderInfoSerializer,
     SeriesProviderInfoSerializer,
@@ -44,14 +43,12 @@ from .image_proxy import (
     vod_image_url_parts,
     vodlogo_cache_url,
 )
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
 from drf_spectacular.types import OpenApiTypes
 from .tasks import refresh_series_episodes, refresh_movie_advanced_data
 from .utils import is_vod_movies_enabled, is_vod_series_enabled, parse_category_filter_value
 from django.utils import timezone
 from datetime import timedelta
-from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiResponse
-from drf_spectacular.types import OpenApiTypes
 from rest_framework.utils.urls import replace_query_param, remove_query_param
 
 logger = logging.getLogger(__name__)
@@ -396,9 +393,9 @@ class EpisodeViewSet(viewsets.ReadOnlyModelViewSet):
             return Episode.objects.none()
 
         # Only return episodes that have active M3U relations
-        return Episode.objects.filter(
+        return Episode.objects.select_related('series').filter(
             m3u_relations__m3u_account__is_active=True
-        ).distinct().select_related('series').prefetch_related('m3u_relations__m3u_account')
+        ).distinct()
 
     @action(detail=True, methods=['get'], url_path='image', permission_classes=[AllowAny])
     def image(self, request, pk=None):
@@ -455,24 +452,17 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
         """Get episodes for this series with provider information"""
         series = self.get_object()
         episodes = Episode.objects.filter(series=series).prefetch_related(
-            'm3u_relations__m3u_account'
+            Prefetch(
+                'm3u_relations',
+                queryset=M3UEpisodeRelation.objects.filter(
+                    m3u_account__is_active=True
+                ).select_related('m3u_account'),
+            )
         ).order_by('season_number', 'episode_number')
 
-        episodes_data = []
-        for episode in episodes:
-            episode_serializer = EpisodeSerializer(episode)
-            episode_data = episode_serializer.data
-
-            # Add provider information
-            relations = M3UEpisodeRelation.objects.filter(
-                episode=episode,
-                m3u_account__is_active=True
-            ).select_related('m3u_account')
-
-            episode_data['providers'] = M3UEpisodeRelationSerializer(relations, many=True).data
-            episodes_data.append(episode_data)
-
-        return Response(episodes_data)
+        return Response(
+            EpisodeWithProvidersSerializer(episodes, many=True).data
+        )
 
     @extend_schema(
         parameters=[
@@ -890,7 +880,7 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
             series_allowed = is_vod_series_enabled(user=user)
             if not movies_allowed and not series_allowed:
                 return Response(
-                    {"count": 0, "next": False, "previous": False, "results": []}
+                    {"count": 0, "next": None, "previous": None, "results": []}
                 )
 
             # Get pagination parameters
@@ -1127,27 +1117,6 @@ class VODLogoViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'url']
     ordering_fields = ['name', 'id']
     ordering = ['name']
-
-    @extend_schema(
-        responses={
-            200: {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "integer"},
-                    "name": {"type": "string"},
-                    "url": {"type": "string"},
-                    "cache_url": {"type": "string"},
-                    "movie_count": {"type": "integer"},
-                    "series_count": {"type": "integer"},
-                    "is_used": {"type": "boolean"},
-                    "item_names": {
-                        "type": "array",
-                        "items": {"type": "string"}
-                    },
-                }
-            }
-        }
-    )
 
     def get_permissions(self):
         try:

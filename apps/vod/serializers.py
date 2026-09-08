@@ -355,7 +355,9 @@ class EnhancedSeriesSerializer(serializers.ModelSerializer):
 
 class EpisodeWithProvidersSerializer(EpisodeSerializer):
     """Episode payload with nested provider relations (series episodes action)."""
-    providers = M3UEpisodeRelationSerializer(many=True, read_only=True)
+    providers = M3UEpisodeRelationSerializer(
+        source='m3u_relations', many=True, read_only=True
+    )
 
 
 class MovieProviderInfoSerializer(serializers.Serializer):
@@ -394,8 +396,10 @@ class MovieProviderInfoSerializer(serializers.Serializer):
 
 
 class SeriesProviderInfoCoverSerializer(serializers.Serializer):
-    id = serializers.IntegerField()
+    # Proxy path may set id to null when cover is relation artwork without a VODLogo.
+    id = serializers.IntegerField(allow_null=True)
     url = serializers.CharField()
+    cache_url = serializers.CharField(required=False, allow_blank=True)
     name = serializers.CharField()
 
 
@@ -438,6 +442,7 @@ class SeriesProviderInfoSerializer(serializers.Serializer):
     category_id = serializers.IntegerField(allow_null=True)
     category_name = serializers.CharField(allow_null=True)
     cover = SeriesProviderInfoCoverSerializer(allow_null=True)
+    backdrop_path = serializers.JSONField(required=False)
     last_refreshed = serializers.DateTimeField()
     custom_properties = serializers.JSONField(allow_null=True)
     m3u_account = VODProviderAccountSerializer()
