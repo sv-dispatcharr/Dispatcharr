@@ -1047,6 +1047,18 @@ def purge_recurring_rule_impl(rule_id: int) -> int:
     return removed
 
 
+def _system_timezone():
+    """Resolve the configured system time zone, falling back to the server's."""
+    from django.utils import timezone
+
+    tz_name = CoreSettings.get_system_time_zone()
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        logger.warning("Invalid or unsupported time zone '%s'; falling back to Server default", tz_name)
+        return timezone.get_current_timezone()
+
+
 def sync_recurring_rule_impl(rule_id: int, drop_existing: bool = True, horizon_days: int = 14) -> int:
     """Ensure recordings exist for a recurring rule within the scheduling horizon."""
     from django.utils import timezone
@@ -1065,12 +1077,7 @@ def sync_recurring_rule_impl(rule_id: int, drop_existing: bool = True, horizon_d
     if not days:
         return 0
 
-    tz_name = CoreSettings.get_system_time_zone()
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:
-        logger.warning("Invalid or unsupported time zone '%s'; falling back to Server default", tz_name)
-        tz = timezone.get_current_timezone()
+    tz = _system_timezone()
     local_today = now.astimezone(tz).date()
     start_limit = rule.start_date or local_today
     end_limit = rule.end_date
@@ -1318,6 +1325,34 @@ def _parse_epg_tv_movie_info(program):
 
 
 
+def _programme_broadcast_start(program, start_time):
+    """Guide air time for broadcast-date placeholders, not the capture window.
+
+    ``Recording.start_time`` includes DVR pre-offset. The booking snapshot's
+    ``program.start_time`` is the unadjusted programme start, so prefer that
+    when present. Fall back to the recording start for manual or recurring
+    bookings without a programme snapshot.
+    """
+    from django.utils import timezone
+    from django.utils.dateparse import parse_datetime
+
+    candidate = start_time
+    if isinstance(program, dict):
+        raw = program.get('start_time')
+        if raw not in (None, ''):
+            parsed = parse_datetime(str(raw))
+            if parsed is None:
+                try:
+                    parsed = datetime.fromisoformat(str(raw).replace('Z', '+00:00'))
+                except ValueError:
+                    parsed = None
+            if parsed is not None:
+                candidate = parsed
+    if timezone.is_naive(candidate):
+        candidate = timezone.make_aware(candidate, timezone.utc)
+    return candidate
+
+
 def _build_output_paths(channel, program, start_time, end_time, recording_id):
     """
     Build (final_path, hls_dir, final_filename) using DVR templates.
@@ -1362,6 +1397,13 @@ def _build_output_paths(channel, program, start_time, end_time, recording_id):
     episode = int(episode) if episode is not None else 0
     year = year or str(start_time.year)
 
+    # Broadcast date in the system time zone, the zone sync_recurring_rule_impl
+    # already uses for local_today, so a filename cannot name a different day
+    # than the rule matched.
+    local_start = _programme_broadcast_start(program, start_time).astimezone(
+        _system_timezone()
+    )
+
     values = {
         'show': show,
         'title': title,
@@ -1372,6 +1414,10 @@ def _build_output_paths(channel, program, start_time, end_time, recording_id):
         'channel': _safe_name(channel.name),
         'start': start_time.strftime('%Y%m%d_%H%M%S'),
         'end': end_time.strftime('%Y%m%d_%H%M%S'),
+        'start_date': local_start.strftime('%Y-%m-%d'),
+        'start_year': local_start.year,
+        'start_month': local_start.month,
+        'start_day': local_start.day,
     }
 
     template = CoreSettings.get_dvr_movie_template() if is_movie else CoreSettings.get_dvr_tv_template()
@@ -1651,6 +1697,18 @@ def get_dvr_stream_base_url():
 
     # AIO, dev, debug: celery and uwsgi share the container, reach uwsgi directly
     return 'http://127.0.0.1:5656'
+
+
+def _dvr_capture_url(base, channel_uuid, output_profile_id=None):
+    """Build the TS proxy URL used for DVR capture.
+
+    When ``output_profile_id`` is set, appends ``?output_profile=<id>`` so the
+    proxy applies that profile. When unset, returns the plain stream URL.
+    """
+    url = f"{base}/proxy/ts/stream/{channel_uuid}"
+    if output_profile_id:
+        url = f"{url}?output_profile={output_profile_id}"
+    return url
 
 
 @shared_task
@@ -1960,7 +2018,9 @@ def run_recording(recording_id, channel_id, start_time_str, end_time_str):
     _ffmpeg_retry_window = _dvr_ffmpeg_retry_window_seconds()
 
     if not interrupted and hls_dir:
-        stream_url = f"{base}/proxy/ts/stream/{channel.uuid}"
+        stream_url = _dvr_capture_url(
+            base, channel.uuid, CoreSettings.get_dvr_output_profile_id()
+        )
         logger.info(f"DVR recording {recording_id}: stream URL: {stream_url}")
         logger.info(f"DVR recording {recording_id}: HLS output dir: {hls_dir}")
         logger.info(
